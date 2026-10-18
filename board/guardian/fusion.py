@@ -1,8 +1,10 @@
-"""Fall-alert state machine: fuses wrist impacts with camera checks.
+"""Fall-alert state machine for a camera + microphone in the room.
 
-Pure logic with an injected clock, so it can be unit-tested off the board.
-Every input returns a list of Effects that the app executes (MCU state,
-watch messages, speech, dashboard broadcast, log entries).
+Cheap CPU triggers (a loud thud on the mic, or motion followed by stillness on the camera)
+wake the NPU, which checks whether someone is on the floor. The board's speaker asks the
+person to get up; the NPU keeps rechecking, and if they stay down the family's StopWatch
+gets the alert. Pure logic with an injected clock, so it can be unit-tested off the board.
+Every input returns a list of Effects that the app executes.
 """
 from __future__ import annotations
 
@@ -13,9 +15,9 @@ from typing import Any
 
 class State(IntEnum):
     MONITORING = 0
-    VERIFYING = 1   # impact seen, waiting for the camera to look
-    CHECKIN = 2     # asking the wearer "are you OK?"
-    ALERT = 3       # caregiver notified, latched until acknowledged or wearer says OK
+    VERIFYING = 1   # a trigger fired; the camera is looking
+    CHECKIN = 2     # person on the floor: asking them to get up, rechecking
+    ALERT = 3       # family alerted; latched until they acknowledge or the person gets up
 
 
 @dataclass
@@ -26,16 +28,18 @@ class Effect:
 
 @dataclass
 class FusionConfig:
-    checkin_s: float = 20.0          # time the wearer has to tap "I'm OK"
-    verify_timeout_s: float = 8.0    # camera must answer within this, else ask the wearer anyway
-    settle_s: float = 1.5            # wait after an impact before looking (person comes to rest)
-    floor_confirmations: int = 2     # background checks in a row before a camera-only check-in
-    rearm_s: float = 10.0            # ignore new impacts this long after a rejected false alarm
+    checkin_s: float = 20.0          # time the person has to get up before the family is alerted
+    verify_timeout_s: float = 15.0   # camera must answer within this, else ask the person anyway
+    settle_s: float = 1.5            # wait after a thud before looking (person comes to rest)
+    recheck_s: float = 4.0           # how often the camera rechecks during the check-in and alert
+    rearm_s: float = 10.0            # ignore triggers this long after a rejected (person upright) check
 
 
-CHECKIN_TEXT = "Are you OK? Tap the watch if you are fine."
-ALERT_TEXT = "I have called for help. Help is on the way."
-CLEAR_TEXT = "Okay. Glad you are fine."
+CHECKIN_TEXT = "Are you okay? I noticed a fall. If you are okay, please get up. Otherwise I will alert your family."
+ALERT_TEXT = "I have alerted your family. Help is on the way."
+ACK_TEXT = "Your family has seen the alert and is on the way."
+CLEAR_TEXT = "Okay. Glad you are up."
+PHRASES = (CHECKIN_TEXT, ALERT_TEXT, ACK_TEXT, CLEAR_TEXT)
 
 
 class Fusion:
@@ -44,9 +48,9 @@ class Fusion:
         self.state = State.MONITORING
         self.since = 0.0
         self.incident: dict[str, Any] | None = None
-        self._floor_streak = 0
         self._rearm_until = 0.0
         self._verify_at: float | None = None
+        self._recheck_at: float | None = None
 
     # ------------------------------------------------------------ helpers
     def _go(self, state: State, now: float, **log) -> list[Effect]:
@@ -56,87 +60,91 @@ class Fusion:
             effects.append(Effect("log", {"kind": f"state:{state.name}", **log}))
         return effects
 
-    def _start_incident(self, now: float, source: str, **extra) -> None:
-        self.incident = {"started": now, "source": source, **extra}
-
     def countdown_left(self, now: float) -> float:
         if self.state != State.CHECKIN:
             return 0.0
         return max(0.0, self.cfg.checkin_s - (now - self.since))
 
-    def _checkin(self, now: float, reason: str) -> list[Effect]:
-        fx = self._go(State.CHECKIN, now, reason=reason)
-        fx.append(Effect("watch", {"type": "checkin", "seconds": self.cfg.checkin_s, "text": CHECKIN_TEXT}))
-        fx.append(Effect("speak", {"text": CHECKIN_TEXT}))
+    def _clear(self, now: float, reason: str, speak: str | None) -> list[Effect]:
+        was = self.state.name
+        self.incident = None
+        self._recheck_at = None
+        fx = self._go(State.MONITORING, now, reason=reason, was=was)
+        fx.append(Effect("watch", {"type": "clear", "text": reason}))
+        if speak:
+            fx.append(Effect("speak", {"text": speak}))
         return fx
 
     # ------------------------------------------------------------ inputs
-    def on_impact(self, now: float, peak_g: float = 0.0) -> list[Effect]:
+    def on_trigger(self, now: float, source: str, **detail) -> list[Effect]:
+        """A cheap CPU trigger fired: 'sound' (thud) or 'motion' (movement, then stillness)."""
         if self.state != State.MONITORING:
-            return [Effect("log", {"kind": "impact_ignored", "peak_g": peak_g, "state": self.state.name})]
-        if now < self._rearm_until:
-            return [Effect("log", {"kind": "impact_ignored", "peak_g": peak_g, "reason": "rearm"})]
-        self._start_incident(now, "watch", peak_g=peak_g)
-        self._verify_at = now + self.cfg.settle_s
-        return self._go(State.VERIFYING, now, peak_g=peak_g)
-
-    def on_sos(self, now: float) -> list[Effect]:
-        """Wearer held the SOS button: skip straight to the alert."""
-        if self.state == State.ALERT:
             return []
-        self._start_incident(now, "sos")
-        return self._alert(now, "SOS button held on the watch.")
+        if now < self._rearm_until:
+            return [Effect("log", {"kind": "trigger_ignored", "source": source, "reason": "rearm", **detail})]
+        self.incident = {"started": now, "source": source, **detail}
+        # A thud happens at the moment of the fall, so give the person a moment to come to rest.
+        # Motion-then-stillness already waited for that.
+        self._verify_at = now + (self.cfg.settle_s if source == "sound" else 0.0)
+        fx = self._go(State.VERIFYING, now, source=source, **detail)
+        fx.append(Effect("watch", {"type": "checking", "text": f"Possible fall ({source}), checking"}))
+        return fx
 
-    def on_vision(self, now: float, on_floor: bool | None, description: str = "",
-                  background: bool = False) -> list[Effect]:
-        """Result of a camera check. on_floor=None means the check failed."""
-        if self.state == State.VERIFYING and not background:
+    def on_vision(self, now: float, on_floor: bool | None, description: str = "") -> list[Effect]:
+        """Result of a camera check. on_floor=None means the check could not tell."""
+        if self.state == State.VERIFYING:
             if self.incident is not None:
                 self.incident["vision"] = {"on_floor": on_floor, "description": description,
                                            "latency_s": now - self.incident["started"]}
             if on_floor is False:
                 self.incident = None
                 self._rearm_until = now + self.cfg.rearm_s
-                fx = self._go(State.MONITORING, now, reason="camera sees person upright",
+                fx = self._go(State.MONITORING, now, reason="camera sees nobody on the floor",
                               description=description)
                 fx.append(Effect("log", {"kind": "false_alarm_rejected", "description": description}))
+                fx.append(Effect("watch", {"type": "clear", "text": "False alarm"}))
                 return fx
-            reason = "camera confirms person on floor" if on_floor else "camera check failed"
-            return self._checkin(now, reason)
+            return self._checkin(now, "person on the floor" if on_floor else "camera could not tell")
 
-        if background and self.state == State.MONITORING:
-            self._floor_streak = self._floor_streak + 1 if on_floor else 0
-            if self._floor_streak >= self.cfg.floor_confirmations:
-                self._floor_streak = 0
-                self._start_incident(now, "camera", vision={"on_floor": True, "description": description})
-                return self._checkin(now, "camera sees person on floor (no watch impact)")
+        if self.state in (State.CHECKIN, State.ALERT):
+            if on_floor is False:
+                return self._clear(now, "person got up", CLEAR_TEXT)
+            if self.incident is not None and on_floor and description:
+                self.incident.setdefault("vision", {})["description"] = description
         return []
 
-    def on_ok(self, now: float, by: str = "wearer") -> list[Effect]:
+    def _checkin(self, now: float, reason: str) -> list[Effect]:
+        self._recheck_at = now + self.cfg.recheck_s
+        fx = self._go(State.CHECKIN, now, reason=reason)
+        fx.append(Effect("speak", {"text": CHECKIN_TEXT}))
+        return fx
+
+    def on_family_ack(self, now: float) -> list[Effect]:
+        """The family member tapped "I'm on my way" on the StopWatch (or the caregiver page)."""
         if self.state in (State.CHECKIN, State.ALERT, State.VERIFYING):
-            was = self.state.name
-            self.incident = None
-            fx = self._go(State.MONITORING, now, reason=f"cleared by {by}", was=was)
-            fx.append(Effect("watch", {"type": "clear", "text": CLEAR_TEXT}))
-            if by == "wearer":
-                fx.append(Effect("speak", {"text": CLEAR_TEXT}))
-            return fx
+            return self._clear(now, "family is on the way", ACK_TEXT)
         return []
 
     def _alert(self, now: float, why: str) -> list[Effect]:
         fx = self._go(State.ALERT, now, reason=why)
-        fx.append(Effect("watch", {"type": "alert", "text": ALERT_TEXT}))
+        desc = ((self.incident or {}).get("vision") or {}).get("description") or "Possible fall."
+        fx.append(Effect("watch", {"type": "alert", "text": desc}))
         fx.append(Effect("speak", {"text": ALERT_TEXT}))
-        fx.append(Effect("log", {"kind": "caregiver_alert", "why": why, "incident": self.incident}))
+        fx.append(Effect("log", {"kind": "family_alert", "why": why, "incident": self.incident}))
         return fx
 
     def tick(self, now: float) -> list[Effect]:
         if self.state == State.VERIFYING:
             if self._verify_at is not None and now >= self._verify_at:
                 self._verify_at = None
-                return [Effect("verify", {"impact_t": self.incident["started"] if self.incident else now})]
+                return [Effect("verify", {"after": (self.incident or {}).get("started", now)})]
             if now - self.since > self.cfg.verify_timeout_s:
                 return self._checkin(now, "camera check timed out")
-        elif self.state == State.CHECKIN and self.countdown_left(now) <= 0:
-            return self._alert(now, "no response to check-in")
+            return []
+        if self.state == State.CHECKIN and self.countdown_left(now) <= 0:
+            self._recheck_at = now + self.cfg.recheck_s
+            return self._alert(now, "still on the floor after the check-in")
+        if self.state in (State.CHECKIN, State.ALERT) and self._recheck_at is not None and now >= self._recheck_at:
+            self._recheck_at = now + self.cfg.recheck_s
+            return [Effect("verify", {"after": now, "recheck": True})]
         return []

@@ -10,7 +10,6 @@ fps = 5
 
 [vision]
 backend = "vlm"                    # "vlm" | "encoder" | "mock"
-background_interval_s = 0         # 0 = camera-only checks only after motion then stillness
 adsp_library_path = "/usr/lib/dsp/cdsp:/usr/lib"
 timeout_s = 30
 
@@ -32,11 +31,18 @@ size = 448
 hidden = 896                       # InternVL3-1B LLM width; output is mean-pooled over image tokens
 output_pattern = "output_{i}_0.raw"
 
+[mic]
+device = "plughw:1,0"              # Logitech Brio 101 microphone (arecord -l); "none" = no sound trigger
+rise_db = 22                       # a thud must be this much louder than the room's background
+min_dbfs = -32
+
 [fusion]
-checkin_s = 20
+checkin_s = 20                     # time to get up before the family is alerted
 verify_timeout_s = 15
+recheck_s = 4                      # camera recheck interval while asking / alerting
 
 [tts]
+speaker = "plughw:0,0"             # board audio out (aplay -l); "none" = silent
 # Leave empty to use espeak-ng (apt). For a nicer voice install Piper and set both paths.
 piper_bin = ""
 piper_model = ""

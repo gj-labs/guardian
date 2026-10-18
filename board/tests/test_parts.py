@@ -139,3 +139,16 @@ def test_vlm_persistent_runner_protocol_and_restart(tmp_path):
     # third request makes the fake runner exit: the client restarts it and retries once
     assert v.check(frame).on_floor is True
     v.stop()
+
+
+def test_thud_detector_fires_on_loud_transient_only():
+    from guardian.audio import ThudDetector
+    d = ThudDetector(rise_db=22, min_dbfs=-32, cooldown_s=5)
+    t = 0.0
+    for _ in range(100):                                   # quiet room around -55 dBFS
+        assert not d.feed(t, -55.0)
+        t += 0.05
+    assert not d.feed(t, -45.0)                            # talking: +10 dB, no trigger
+    assert d.feed(t + 0.05, -20.0)                         # thud: +35 dB
+    assert not d.feed(t + 1.0, -20.0)                      # cooldown
+    assert d.feed(t + 6.0, -20.0)

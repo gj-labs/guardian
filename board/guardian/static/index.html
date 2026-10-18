@@ -71,7 +71,7 @@ dt { color: var(--muted); } dd { margin: 0; font-variant-numeric: tabular-nums; 
       </div>
       <img id="snap" alt="Incident snapshot from the home camera">
       <div class="row">
-        <button class="primary" id="ack" disabled>Mark resolved</button>
+        <button class="primary" id="ack" disabled>I'm on my way</button>
         <button id="privacy">Pause camera</button>
       </div>
 
@@ -98,9 +98,9 @@ dt { color: var(--muted); } dd { margin: 0; font-variant-numeric: tabular-nums; 
       <div class="card" id="dev">
         <h2>Rehearsal (dev mode)</h2>
         <div class="row" style="margin-top:0">
-          <button data-sim="impact">Watch impact</button>
-          <button data-sim="ok">Wearer taps OK</button>
-          <button data-sim="sos">SOS button</button>
+          <button data-sim="trigger?source=sound">Thud (sound)</button>
+          <button data-sim="trigger?source=motion">Motion, then still</button>
+          <button data-sim="say">Speaker test</button>
           <button id="floor">Mock: person on floor</button>
         </div>
       </div>
@@ -109,7 +109,7 @@ dt { color: var(--muted); } dd { margin: 0; font-variant-numeric: tabular-nums; 
 </main>
 <script>
 const $ = (id) => document.getElementById(id);
-const LABELS = { MONITORING: "Monitoring", VERIFYING: "Checking camera…", CHECKIN: "Asking wearer", ALERT: "Help needed" };
+const LABELS = { MONITORING: "Monitoring", VERIFYING: "Checking camera…", CHECKIN: "Asking them to get up", ALERT: "Family alerted" };
 let status = null;
 
 function fmtTime(t) { return new Date(t * 1000).toLocaleTimeString(); }
@@ -118,10 +118,10 @@ function esc(s) { return String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;"
 function describe(s) {
   const inc = s.incident || {};
   const v = inc.vision || {};
-  if (s.state === "MONITORING") return s.camera.privacy ? "Camera paused for privacy. Watch still protects." : "All quiet.";
-  if (s.state === "VERIFYING") return `Wrist impact (${(inc.peak_g || 0).toFixed(1)} g). Looking with the camera…`;
-  if (s.state === "CHECKIN") return `${v.description || "Possible fall."} Waiting for the wearer: ${Math.ceil(s.countdown)} s`;
-  return (inc.source === "sos" ? "SOS button held on the watch." : (v.description || "No response after a possible fall.")) + " Go check now.";
+  if (s.state === "MONITORING") return s.camera.privacy ? "Camera paused for privacy. Fall checks are off." : "All quiet.";
+  if (s.state === "VERIFYING") return `${inc.source === "sound" ? "Loud thud heard" : "Movement, then stillness"}. Looking with the camera…`;
+  if (s.state === "CHECKIN") return `${v.description || "Possible fall."} Asked them to get up; alerting family in ${Math.ceil(s.countdown)} s.`;
+  return (v.description || "Still on the floor after the check-in.") + " Go check now.";
 }
 
 function chip(text, cls) { return `<span class="chip ${cls}">${esc(text)}</span>`; }
@@ -134,17 +134,18 @@ function render(s) {
   $("ack").disabled = s.state === "MONITORING";
   $("privacy").textContent = s.camera.privacy ? "Resume camera" : "Pause camera";
   $("chips").innerHTML = [
-    chip(s.watch.online ? `Watch online${s.watch.battery != null ? " · " + s.watch.battery + "%" : ""}` : "Watch offline", s.watch.online ? "ok" : "bad"),
+    chip(s.watch.online ? `Family watch online${s.watch.battery != null ? " · " + s.watch.battery + "%" : ""}` : "Family watch offline", s.watch.online ? "ok" : "bad"),
+    chip(!s.mic ? "Mic off (config)" : s.mic.active ? `Mic on · ${s.mic.level_db ?? "-"} dB` : "Mic error", !s.mic ? "warn" : (s.mic.active ? "ok" : "bad")),
     chip(!s.camera.enabled ? "Camera off (config)" : s.camera.privacy ? "Camera paused" : s.camera.active ? "Camera on" : "Camera error", s.camera.active ? "ok" : (s.camera.privacy ? "warn" : "bad")),
     chip(s.mcu.mock ? "Pixels: mock bridge" : (s.mcu.ok ? "Pixels: STM32 linked" : "Pixels: link down"), s.mcu.mock ? "warn" : (s.mcu.ok ? "ok" : "bad")),
     chip(`Vision: ${s.vision.backend}${s.vision.busy ? " (running)" : ""}`, s.vision.backend === "mock" ? "warn" : "ok"),
-    chip(`Voice: ${s.tts}`, s.tts === "none" ? "warn" : "ok"),
+    chip(`Speaker: ${s.speaker === "none" ? "off" : s.tts}`, s.speaker === "none" || s.tts === "none" ? "warn" : "ok"),
   ].join("");
   const v = s.vision.last;
   $("vision").innerHTML = v ? `<dt>Person on floor</dt><dd>${v.on_floor === null ? "check failed" : v.on_floor ? "yes" : "no"}</dd>
     <dt>Description</dt><dd>${esc(v.description)}</dd><dt>Model time</dt><dd>${v.latency_ms} ms (${esc(v.backend)})</dd>
     <dt>At</dt><dd>${fmtTime(v.t)}</dd>` : "<dt>Result</dt><dd>none yet</dd>";
-  const m = s.metrics, rows = [["Camera check", m.vision_ms], ["Trigger → ask wearer", m.trigger_to_checkin_ms], ["Trigger → caregiver alert", m.trigger_to_alert_ms]]
+  const m = s.metrics, rows = [["Camera check", m.vision_ms], ["Trigger → ask person", m.trigger_to_checkin_ms], ["Trigger → family alert", m.trigger_to_alert_ms]]
     .filter(([, x]) => x != null).map(([k, x]) => `<dt>${k}</dt><dd>${x} ms</dd>`).join("");
   $("metrics").innerHTML = rows || "<dt>-</dt><dd>no incident yet</dd>";
   $("dev").style.display = s.dev ? "block" : "none";
@@ -158,7 +159,7 @@ async function loadLog() {
   $("log").innerHTML = r.events.map(e => `<tr><td class="t">${fmtTime(e.t)}</td><td><b>${esc(e.kind)}</b>
     ${esc(Object.entries(e.data).filter(([k]) => k !== "incident").map(([k, x]) => `${k}: ${typeof x === "object" ? JSON.stringify(x) : x}`).join(" · "))}</td></tr>`).join("");
   $("chain").textContent = r.chain_ok ? "Log hash chain verified." : "Log hash chain BROKEN: entries were changed.";
-  const alert = r.events.find(e => e.kind === "caregiver_alert" && e.has_snapshot);
+  const alert = r.events.find(e => e.kind === "family_alert" && e.has_snapshot);
   if (alert && status && status.state === "ALERT") { $("snap").src = `/api/snapshot/${alert.id}.jpg`; $("snap").style.display = "block"; }
   else if (!status || status.state === "MONITORING") $("snap").style.display = "none";
 }

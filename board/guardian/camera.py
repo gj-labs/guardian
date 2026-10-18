@@ -1,6 +1,6 @@
 """USB camera capture with a short frame history and a cheap motion score.
 
-The motion score (CPU frame differencing) gates the NPU: background checks only
+The motion score (CPU frame differencing) gates the NPU: camera-triggered checks only
 run after a burst of motion followed by stillness, which is what a fall looks like.
 """
 from __future__ import annotations

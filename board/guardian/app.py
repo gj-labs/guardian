@@ -1,4 +1,5 @@
-"""Guardian board app: FastAPI hub tying the StopWatch, camera/NPU, STM32 Pixels and caregiver page.
+"""Guardian board app: camera + mic triggers, NPU fall check, board speaker, STM32 Pixels,
+and the family's StopWatch, tied together by a FastAPI hub with a caregiver page.
 
 Run on the VENTUNO Q (or a laptop with config defaults = all mocks):
     .venv/bin/uvicorn guardian.app:app --host 0.0.0.0 --port 8000
@@ -17,10 +18,11 @@ from pydantic import BaseModel
 
 from . import config as config_mod
 from .bridge import MockBridge, make_bridge
+from .audio import Microphone
 from .camera import Camera, jpeg
-from .fusion import Effect, Fusion, FusionConfig, State
+from .fusion import PHRASES, Effect, Fusion, FusionConfig, State
 from .store import Store
-from .tts import OUT_RATE, Speech
+from .tts import Speech
 from .vision import MockVision, make_vision, parse_yes_no
 
 log = logging.getLogger("guardian")
@@ -42,7 +44,12 @@ class Guardian:
             cam["device"], cam["fps"], width=cam["width"], height=cam["height"])
         self.vision = make_vision(cfg["vision"])
         t = cfg["tts"]
-        self.speech = Speech(t["piper_bin"] or None, t["piper_model"] or None, t["piper_rate"])
+        self.speech = Speech(t["piper_bin"] or None, t["piper_model"] or None, t["piper_rate"], t["speaker"])
+        mic = cfg["mic"]
+        self.mic = None if mic["device"] == "none" else Microphone(
+            mic["device"], self._on_thud, rise_db=mic["rise_db"], min_dbfs=mic["min_dbfs"])
+        self.loop: asyncio.AbstractEventLoop | None = None
+        self.speaking = False
         self.privacy = False
         self.dash: set[WebSocket] = set()
         self.watch: WebSocket | None = None
@@ -50,7 +57,7 @@ class Guardian:
         self.watch_battery: int | None = None
         self.vision_busy = False
         self.last_vision: dict | None = None
-        self.last_bg = 0.0
+        self.last_motion_trigger = 0.0
         self.metrics: dict = {}
         self.mcu_error: str | None = None
         self._tasks: list[asyncio.Task] = []
@@ -78,7 +85,11 @@ class Guardian:
             "vision": {"backend": self.vision.name, "busy": self.vision_busy, "last": self.last_vision,
                        "mock_on_floor": getattr(self.vision, "on_floor", None)
                        if isinstance(self.vision, MockVision) else None},
+            "mic": None if self.mic is None else {"active": self.mic.active, "error": self.mic.error,
+                                                   "level_db": None if self.mic.level_db is None
+                                                   else round(self.mic.level_db, 1)},
             "tts": self.speech.engine,
+            "speaker": self.speech.speaker,
             "metrics": self.metrics,
             "dev": self.cfg["dev"],
         }
@@ -100,16 +111,12 @@ class Guardian:
             self.watch = None
 
     async def speak(self, text: str) -> None:
-        if self.watch is None:
-            return
-        pcm = await asyncio.to_thread(self.speech.pcm16k, text)
-        if not pcm:
-            return
+        """Board speaker. The mic ignores its own voice while it plays."""
+        self.speaking = True
         try:
-            await self.watch.send_json({"type": "audio", "rate": OUT_RATE, "bytes": len(pcm)})
-            await self.watch.send_bytes(pcm)
-        except Exception:
-            self.watch = None
+            await asyncio.to_thread(self.speech.play, text)
+        finally:
+            self.speaking = False
 
     def _mcu_push(self) -> None:
         f = self.fusion
@@ -133,12 +140,12 @@ class Guardian:
             elif fx.kind == "log":
                 data = dict(fx.data)
                 kind = data.pop("kind")
-                snap = self._snapshot() if kind == "caregiver_alert" else None
+                snap = self._snapshot() if kind == "family_alert" else None
                 eid = self.store.add(kind, data, snap)
                 await self.broadcast({"type": "event", "event": {"id": eid, "t": time.time(), "kind": kind,
                                                                  "data": data, "has_snapshot": snap is not None}})
             elif fx.kind == "verify":
-                asyncio.create_task(self.verify(fx.data["impact_t"]))
+                asyncio.create_task(self.verify(fx.data["after"], fx.data.get("recheck", False)))
 
     def _mark(self, state: str) -> None:
         """Latency metrics for the incident in progress (shown on the dashboard, used in the README)."""
@@ -170,36 +177,34 @@ class Guardian:
         self.metrics["vision_ms"] = round(r.latency_ms)
         return self.last_vision
 
-    async def verify(self, impact_t: float) -> None:
+    async def verify(self, after: float, recheck: bool = False) -> None:
+        if self.vision_busy:
+            return
         frame = None
         if self.camera_active():
-            got = self.camera.frame_after(impact_t + self.fusion.cfg.settle_s)
+            got = self.camera.frame_after(after)
             frame = got[1] if got else None
         res = await self._check(frame)
-        self.store.add("vision", {**res, "trigger": "impact"})
+        self.store.add("vision", {**res, "trigger": "recheck" if recheck else "verify"})
         await self.run(self.fusion.on_vision(time.monotonic(), res["on_floor"], res["description"]))
 
-    async def background_check(self, now: float) -> None:
-        latest = self.camera.latest() if self.camera_active() else None
-        if latest is None and not isinstance(self.vision, MockVision):
+    # ------------------------------------------------------------ CPU triggers
+    def _on_thud(self, now: float, level_db: float) -> None:
+        """Called from the mic thread."""
+        if self.speaking or self.loop is None:
             return
-        self.last_bg = now
-        res = await self._check(latest[1] if latest else None)
-        if res["on_floor"]:
-            self.store.add("vision", {**res, "trigger": "background"})
-        await self.run(self.fusion.on_vision(time.monotonic(), res["on_floor"], res["description"],
-                                             background=True))
+        asyncio.run_coroutine_threadsafe(self.trigger("sound", level_db=round(level_db, 1)), self.loop)
 
-    def _bg_due(self, now: float) -> bool:
-        if self.fusion.state != State.MONITORING or self.vision_busy:
-            return False
-        since = now - self.last_bg
-        # Camera-only checks run after "motion, then stillness" (what a fall looks like), so
-        # something that has lain still all along (a doll, a bag) never triggers them.
-        if self.camera_active() and since > 5 and self.camera.burst_then_still(now):
-            return True
-        interval = self.cfg["vision"]["background_interval_s"]   # optional periodic check; 0 = off
-        return interval > 0 and since > interval
+    async def trigger(self, source: str, **detail) -> None:
+        if self.fusion.state == State.MONITORING:
+            self.store.add("trigger", {"source": source, **detail})
+        await self.run(self.fusion.on_trigger(time.monotonic(), source, **detail))
+
+    def _motion_due(self, now: float) -> bool:
+        # Movement followed by stillness is what a fall looks like on camera. Something that
+        # has lain still all along (a doll, a bag) never fires this.
+        return (self.fusion.state == State.MONITORING and not self.vision_busy and self.camera_active()
+                and now - self.last_motion_trigger > 10 and self.camera.burst_then_still(now))
 
     # ------------------------------------------------------------ loops
     async def tick_loop(self) -> None:
@@ -211,15 +216,18 @@ class Guardian:
                 last_push = now
                 await asyncio.to_thread(self._mcu_push)
                 await self.broadcast(self.status())
-            if self._bg_due(now):
-                asyncio.create_task(self.background_check(now))
+            if self._motion_due(now):
+                self.last_motion_trigger = now
+                asyncio.create_task(self.trigger("motion"))
             await asyncio.sleep(0.25)
 
     async def start(self) -> None:
+        self.loop = asyncio.get_running_loop()
         if self.camera is not None:
             self.camera.start()
-        for text in ("Are you OK? Tap the watch if you are fine.", "I have called for help. Help is on the way.",
-                     "Okay. Glad you are fine."):
+        if self.mic is not None:
+            self.mic.start()
+        for text in PHRASES:
             await asyncio.to_thread(self.speech.pcm16k, text)   # warm the phrase cache
         if hasattr(self.vision, "start"):        # load the VLM once so the first fall check is fast
             try:
@@ -238,6 +246,8 @@ class Guardian:
             await asyncio.to_thread(self.vision.stop)
         if self.camera is not None:
             self.camera.stop()
+        if self.mic is not None:
+            self.mic.stop()
 
 
 # ---------------------------------------------------------------- HTTP / WebSocket
@@ -287,7 +297,7 @@ def create_app(cfg: dict | None = None) -> FastAPI:
 
     @app.post("/api/ack")
     async def ack():
-        await g.run(g.fusion.on_ok(time.monotonic(), by="caregiver"))
+        await g.run(g.fusion.on_family_ack(time.monotonic()))
         return g.status()
 
     @app.post("/api/privacy")
@@ -304,23 +314,17 @@ def create_app(cfg: dict | None = None) -> FastAPI:
         if not g.cfg["dev"]:
             raise HTTPException(403, "dev endpoints disabled")
 
-    @app.post("/api/sim/impact")
-    async def sim_impact(peak_g: float = 3.5):
+    @app.post("/api/sim/trigger")
+    async def sim_trigger(source: str = "sound"):
         dev_only()
-        await g.run(g.fusion.on_impact(time.monotonic(), peak_g))
+        await g.trigger(source, simulated=True)
         return g.status()
 
-    @app.post("/api/sim/ok")
-    async def sim_ok():
+    @app.post("/api/sim/say")
+    async def sim_say(text: str = "Hello. This is Guardian. Speaker test."):
         dev_only()
-        await g.run(g.fusion.on_ok(time.monotonic()))
-        return g.status()
-
-    @app.post("/api/sim/sos")
-    async def sim_sos():
-        dev_only()
-        await g.run(g.fusion.on_sos(time.monotonic()))
-        return g.status()
+        await g.speak(text)
+        return {"engine": g.speech.engine, "speaker": g.speech.speaker}
 
     @app.post("/api/sim/floor")
     async def sim_floor(p: Toggle):
@@ -362,26 +366,22 @@ def create_app(cfg: dict | None = None) -> FastAPI:
 
     @app.websocket("/ws/watch")
     async def ws_watch(ws: WebSocket):
+        """The family member's StopWatch: shows alerts, sends "I'm on my way"."""
         await ws.accept()
         g.watch, g.watch_seen = ws, time.monotonic()
         g.store.add("watch_connected", {})
+        inc = g.fusion.incident or {}
         await ws.send_json({"type": "state", "state": g.fusion.state.name,
-                            "seconds": g.fusion.countdown_left(time.monotonic())})
+                            "text": ((inc.get("vision") or {}).get("description") or "")})
         try:
             while True:
                 msg = await ws.receive_json()
                 g.watch_seen = time.monotonic()
                 kind = msg.get("type")
-                now = time.monotonic()
                 if kind == "hb":
                     g.watch_battery = msg.get("battery")
-                elif kind == "impact":
-                    g.store.add("impact", {"peak_g": msg.get("peak_g")})
-                    await g.run(g.fusion.on_impact(now, float(msg.get("peak_g", 0))))
-                elif kind == "ok":
-                    await g.run(g.fusion.on_ok(now))
-                elif kind == "sos":
-                    await g.run(g.fusion.on_sos(now))
+                elif kind == "ack":
+                    await g.run(g.fusion.on_family_ack(time.monotonic()))
         except (WebSocketDisconnect, RuntimeError, ValueError):
             pass
         finally:

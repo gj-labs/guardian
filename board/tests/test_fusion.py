@@ -1,4 +1,4 @@
-from guardian.fusion import Fusion, FusionConfig, State
+from guardian.fusion import ACK_TEXT, CHECKIN_TEXT, CLEAR_TEXT, Fusion, FusionConfig, State
 
 
 def kinds(fx):
@@ -6,73 +6,84 @@ def kinds(fx):
 
 
 def make():
-    return Fusion(FusionConfig(checkin_s=20, verify_timeout_s=8, settle_s=1.5, floor_confirmations=2, rearm_s=10))
+    return Fusion(FusionConfig(checkin_s=20, verify_timeout_s=15, settle_s=1.5, recheck_s=4, rearm_s=10))
 
 
-def test_impact_confirmed_by_camera_then_no_response_alerts():
+def speaks(fx):
+    return [e.data["text"] for e in fx if e.kind == "speak"]
+
+
+def watch(fx):
+    return [e.data["type"] for e in fx if e.kind == "watch"]
+
+
+def test_thud_then_person_stays_down_alerts_family():
     f = make()
-    assert f.on_impact(100.0, 3.2)[0].data["state"] == "VERIFYING"
-    assert f.tick(101.0) == []                       # still settling
+    fx = f.on_trigger(100.0, "sound", level_db=-12.0)
+    assert f.state == State.VERIFYING and watch(fx) == ["checking"]
+    assert f.tick(101.0) == []                                  # settling after the thud
     assert kinds(f.tick(101.6)) == ["verify"]
-    fx = f.on_vision(103.0, True, "Person on floor")
-    assert f.state == State.CHECKIN
-    assert {"watch", "speak"} <= set(kinds(fx))
-    assert f.tick(122.0) == []                       # 19 s into the check-in
-    fx = f.tick(123.1)
+    fx = f.on_vision(102.6, True, "Yes, a person is lying on the floor.")
+    assert f.state == State.CHECKIN and speaks(fx) == [CHECKIN_TEXT]
+    assert kinds(f.tick(106.7)) == ["verify"]                   # recheck while asking
+    assert f.on_vision(107.7, True) == []                       # still down
+    fx = f.tick(122.7)
     assert f.state == State.ALERT
-    assert any(e.kind == "log" and e.data["kind"] == "caregiver_alert" for e in fx)
+    assert any(e.kind == "watch" and e.data["type"] == "alert" and "lying" in e.data["text"] for e in fx)
+    assert any(e.kind == "log" and e.data["kind"] == "family_alert" for e in fx)
 
 
-def test_camera_sees_person_upright_rejects_false_alarm_and_rearms():
+def test_motion_trigger_checks_immediately():
     f = make()
-    f.on_impact(0.0, 4.0)
+    f.on_trigger(0.0, "motion")
+    assert kinds(f.tick(0.25)) == ["verify"]
+
+
+def test_person_upright_is_a_false_alarm_and_rearms():
+    f = make()
+    f.on_trigger(0.0, "sound")
     f.tick(2.0)
-    fx = f.on_vision(3.0, False, "Person standing")
-    assert f.state == State.MONITORING
+    fx = f.on_vision(3.0, False, "No, the person is standing.")
+    assert f.state == State.MONITORING and watch(fx) == ["clear"]
     assert any(e.data.get("kind") == "false_alarm_rejected" for e in fx if e.kind == "log")
-    assert f.on_impact(5.0, 4.0)[0].data["reason"] == "rearm"      # watch dropped again right away
-    assert f.on_impact(14.0, 4.0)[0].data["state"] == "VERIFYING"
+    assert f.on_trigger(5.0, "sound")[0].data["reason"] == "rearm"
+    assert f.on_trigger(14.0, "sound")[0].data["state"] == "VERIFYING"
 
 
-def test_wearer_ok_clears_checkin():
+def test_person_gets_up_during_checkin_or_alert_clears():
+    for alert_first in (False, True):
+        f = make()
+        f.on_trigger(0.0, "motion")
+        f.tick(0.1)
+        f.on_vision(1.0, True)
+        if alert_first:
+            f.tick(21.5)
+            assert f.state == State.ALERT
+        fx = f.on_vision(25.0, False)
+        assert f.state == State.MONITORING and f.incident is None
+        assert speaks(fx) == [CLEAR_TEXT] and watch(fx) == ["clear"]
+
+
+def test_camera_cannot_tell_still_asks_and_late_answers_are_rechecks():
     f = make()
-    f.on_impact(0.0)
+    f.on_trigger(0.0, "sound")
     f.tick(2.0)
-    f.on_vision(3.0, True)
-    fx = f.on_ok(5.0)
-    assert f.state == State.MONITORING and f.incident is None
-    assert any(e.kind == "watch" and e.data["type"] == "clear" for e in fx)
-
-
-def test_failed_or_slow_camera_still_asks_the_wearer():
-    f = make()
-    f.on_impact(0.0)
-    f.tick(2.0)
-    f.on_vision(3.0, None, "runner error")
+    f.on_vision(3.0, None, "camera view too dark to check")
     assert f.state == State.CHECKIN
     g = make()
-    g.on_impact(0.0)
+    g.on_trigger(0.0, "sound")
     g.tick(2.0)
-    g.tick(8.5)
-    assert g.state == State.CHECKIN
-    g.on_vision(9.0, False)                          # late answer is ignored once asking
+    g.tick(15.5)
     assert g.state == State.CHECKIN
 
 
-def test_camera_only_fall_needs_two_background_confirmations():
+def test_family_ack_clears_and_tells_the_person():
     f = make()
-    assert f.on_vision(0.0, True, background=True) == []
-    assert f.on_vision(30.0, False, background=True) == []
-    f.on_vision(60.0, True, background=True)
-    assert f.state == State.MONITORING
-    f.on_vision(90.0, True, "on floor", background=True)
-    assert f.state == State.CHECKIN and f.incident["source"] == "camera"
-
-
-def test_sos_alerts_immediately_and_caregiver_can_resolve():
-    f = make()
-    f.on_sos(0.0)
-    assert f.state == State.ALERT and f.incident["source"] == "sos"
-    fx = f.on_ok(30.0, by="caregiver")
-    assert f.state == State.MONITORING
-    assert not any(e.kind == "speak" for e in fx)
+    f.on_trigger(0.0, "motion")
+    f.tick(0.1)
+    f.on_vision(1.0, True)
+    f.tick(21.5)
+    fx = f.on_family_ack(30.0)
+    assert f.state == State.MONITORING and speaks(fx) == [ACK_TEXT]
+    assert f.on_family_ack(31.0) == []
+    assert f.on_trigger(32.0, "sound")[0].data["state"] == "VERIFYING"   # no rearm after a real incident
