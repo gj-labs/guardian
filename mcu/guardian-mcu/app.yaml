@@ -1,0 +1,7 @@
+# Arduino App for the VENTUNO Q's STM32: Guardian alarm lights on Modulino Pixels.
+# The Guardian board app (board/) calls guardian_set over Arduino Bridge.
+name: guardian-mcu
+description: Guardian alarm lights (STM32 + Modulino Pixels)
+icon: 🚨
+ports: []
+bricks: []
