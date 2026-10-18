@@ -11,7 +11,7 @@ import logging
 import time
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 
@@ -218,6 +218,12 @@ class Guardian:
         for text in ("Are you OK? Tap the watch if you are fine.", "I have called for help. Help is on the way.",
                      "Okay. Glad you are fine."):
             await asyncio.to_thread(self.speech.pcm16k, text)   # warm the phrase cache
+        if hasattr(self.vision, "start"):        # load the VLM once so the first fall check is fast
+            try:
+                await asyncio.to_thread(self.vision.start)
+            except Exception as e:
+                log.error("vision backend failed to start: %s", e)
+                self.store.add("vision_start_failed", {"error": str(e)})
         self.store.add("startup", {"vision": self.vision.name, "tts": self.speech.engine,
                                    "bridge": type(self.bridge).__name__})
         self._tasks.append(asyncio.create_task(self.tick_loop()))
@@ -225,6 +231,8 @@ class Guardian:
     async def stop(self) -> None:
         for t in self._tasks:
             t.cancel()
+        if hasattr(self.vision, "stop"):
+            await asyncio.to_thread(self.vision.stop)
         if self.camera is not None:
             self.camera.stop()
 
@@ -306,6 +314,17 @@ def create_app(cfg: dict | None = None) -> FastAPI:
             raise HTTPException(409, "only with vision.backend = mock")
         g.vision.on_floor = p.on
         return g.status()
+
+    @app.post("/api/sim/check")
+    async def sim_check(request: Request):
+        """Run one camera check on an uploaded JPEG/PNG (body = image bytes). Does not change state."""
+        dev_only()
+        import cv2
+        import numpy as np
+        frame = cv2.imdecode(np.frombuffer(await request.body(), np.uint8), cv2.IMREAD_COLOR)
+        if frame is None:
+            raise HTTPException(400, "body must be a JPEG or PNG image")
+        return await g._check(frame)
 
     @app.websocket("/ws/dash")
     async def ws_dash(ws: WebSocket):

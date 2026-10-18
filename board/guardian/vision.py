@@ -1,8 +1,8 @@
 """Camera checks: "is a person on the floor?"
 
 Backends (pick with config `vision.backend`):
-  vlm      InternVL3-1B (QCS8275 QNN .pte from the track Drive) through a multimodal
-           runner command. Answers yes/no and writes a one-line description.
+  vlm      InternVL3-1B (QCS8275 QNN .pte from the track Drive) kept loaded in
+           qnn_multimodal_persistent. Answers yes/no and writes a one-line description.
   encoder  Only the InternVL3 vision encoder .pte, run with qnn_executor_runner.
            Frames are embedded and compared with your own reference photos
            (refs/floor, refs/upright, refs/empty). Fallback if the VLM runner is not ready.
@@ -10,12 +10,14 @@ Backends (pick with config `vision.backend`):
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
+import queue
 import re
-import shlex
 import subprocess
 import tempfile
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -56,15 +58,6 @@ def parse_yes_no(text: str) -> bool | None:
     return None if m is None else m.group(1) == "yes"
 
 
-def _clean_answer(text: str, after: str | None) -> str:
-    if after and after in text:
-        text = text.split(after, 1)[1]
-    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-    # Runners print logs around the generation; keep the lines that read like an answer.
-    keep = [ln for ln in lines if re.search(r"\b(yes|no)\b", ln.lower())] or lines[-1:]
-    return " ".join(keep)[:240]
-
-
 # ---------------------------------------------------------------- backends
 
 class MockVision:
@@ -82,35 +75,110 @@ class MockVision:
 
 
 class VlmVision:
-    """Runs a multimodal runner per check. `command` is a template with {image} and {prompt}."""
+    """InternVL3-1B on the NPU through `qnn_multimodal_persistent` (shipped in the track's
+    ExecuTorch source archive). The runner loads the three .pte files once (~8 s) and then
+    answers one request per stdin line:  <image.raw>\t<prompt>\t<seq_len>  ->  RESULT_READY n ...
+    The generated text is written to --output_path.
+    """
 
     name = "vlm"
 
-    def __init__(self, command: str, answer_after: str | None = None, timeout_s: float = 30.0,
-                 workdir: str | None = None, env: dict[str, str] | None = None) -> None:
-        self.command, self.answer_after = command, answer_after
-        self.timeout_s, self.workdir = timeout_s, workdir
+    def __init__(self, runner: str, model_dir: str, model_prefix: str, workdir: str,
+                 seq_len: int = 330, timeout_s: float = 30.0, load_timeout_s: float = 90.0,
+                 env: dict[str, str] | None = None) -> None:
+        self.runner, self.model_dir, self.prefix = runner, Path(model_dir), model_prefix
+        self.workdir = Path(workdir)
+        self.seq_len, self.timeout_s, self.load_timeout_s = seq_len, timeout_s, load_timeout_s
         self.env = {**os.environ, **(env or {})}
+        self._proc: subprocess.Popen | None = None
+        self._lines: queue.Queue[str] = queue.Queue()
+        self._lock = threading.Lock()
+        self._req = 0
+
+    def _argv(self) -> list[str]:
+        m = self.model_dir
+        return [self.runner, "--decoder_model_version", "internvl3",
+                "--decoder_path", str(m / f"{self.prefix}.pte"),
+                "--encoder_path", str(m / f"{self.prefix}_vision_encoder_qnn.pte"),
+                "--tok_embedding_path", str(m / f"{self.prefix}_tok_embedding_qnn.pte"),
+                "--tokenizer_path", str(m / "tokenizer.json"),
+                "--output_path", str(self.workdir / "vlm_out.txt"),
+                "--seq_len", str(self.seq_len)]
+
+    def start(self) -> None:
+        """Launch the runner and wait for READY (model + QNN contexts loaded)."""
+        if self._proc is not None and self._proc.poll() is None:
+            return
+        self.workdir.mkdir(parents=True, exist_ok=True)
+        self._lines = queue.Queue()
+        log_f = open(self.workdir / "vlm_runner.log", "ab")
+        self._proc = subprocess.Popen(self._argv(), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                      stderr=log_f, cwd=self.workdir, env=self.env, text=True, bufsize=1)
+        threading.Thread(target=self._pump, args=(self._proc,), daemon=True).start()
+        line = self._wait(lambda ln: ln == "READY", self.load_timeout_s)
+        if line != "READY":
+            self.stop()
+            raise RuntimeError(f"runner did not become ready ({line!r}); see {self.workdir}/vlm_runner.log")
+
+    def _pump(self, proc: subprocess.Popen) -> None:
+        for ln in proc.stdout:
+            self._lines.put(ln.strip())
+        self._lines.put("<EOF>")
+
+    def _wait(self, done, timeout: float) -> str:
+        end = time.monotonic() + timeout
+        while True:
+            try:
+                ln = self._lines.get(timeout=max(0.01, end - time.monotonic()))
+            except queue.Empty:
+                return "<TIMEOUT>"
+            if ln == "<EOF>" or done(ln):
+                return ln
+
+    def stop(self) -> None:
+        if self._proc is not None:
+            with contextlib.suppress(Exception):
+                self._proc.stdin.close()
+                self._proc.wait(timeout=5)
+            with contextlib.suppress(Exception):
+                self._proc.kill()
+        self._proc = None
+
+    def ask(self, frame: np.ndarray, prompt: str = FLOOR_PROMPT) -> str:
+        with self._lock:
+            for attempt in (0, 1):            # one restart if the runner died
+                self.start()
+                raw = self.workdir / "frame.raw"
+                preprocess(frame).tofile(raw)
+                out = self.workdir / "vlm_out.txt"
+                out.unlink(missing_ok=True)
+                self._proc.stdin.write(f"{raw}\t{prompt.replace(chr(9), ' ')}\t{self.seq_len}\n")
+                self._proc.stdin.flush()
+                ln = self._wait(lambda s: s.startswith("RESULT_"), self.timeout_s)
+                if ln.startswith("RESULT_READY"):
+                    return _assistant_text(out.read_text(errors="replace"))
+                if ln.startswith("RESULT_ERROR"):
+                    raise RuntimeError(ln)
+                self.stop()                    # EOF or timeout: restart once
+            raise RuntimeError(f"runner failed: {ln}")
 
     def check(self, frame: np.ndarray | None) -> VisionResult:
-        import cv2
         t0 = time.monotonic()
         if frame is None:
             return VisionResult(None, "no camera frame", 0.0, self.name)
-        with tempfile.TemporaryDirectory() as d:
-            img = Path(d) / "frame.jpg"
-            cv2.imwrite(str(img), frame)
-            argv = [a.format(image=str(img), prompt=FLOOR_PROMPT) for a in shlex.split(self.command)]
-            try:
-                out = subprocess.run(argv, capture_output=True, text=True, timeout=self.timeout_s,
-                                     cwd=self.workdir, env=self.env)
-            except (OSError, subprocess.TimeoutExpired) as e:
-                return VisionResult(None, f"runner error: {e}", (time.monotonic() - t0) * 1000, self.name)
-        text = _clean_answer(out.stdout, self.answer_after)
-        verdict = parse_yes_no(text)
-        if out.returncode != 0 and verdict is None:
-            text = f"runner exit {out.returncode}: {out.stderr.strip()[-200:]}"
-        return VisionResult(verdict, text, (time.monotonic() - t0) * 1000, self.name)
+        try:
+            text = self.ask(frame)
+        except Exception as e:  # never crash the alert loop; fusion treats None as "ask the wearer"
+            log.exception("vlm check failed")
+            return VisionResult(None, f"vlm error: {e}", (time.monotonic() - t0) * 1000, self.name)
+        return VisionResult(parse_yes_no(text), text, (time.monotonic() - t0) * 1000, self.name)
+
+
+def _assistant_text(out: str) -> str:
+    """Generated text from the runner's output file (after the last 'assistant' marker)."""
+    if "assistant" in out:
+        out = out.rsplit("assistant", 1)[1]
+    return out.replace("<|im_end|>", "").strip()[:240]
 
 
 class EncoderVision:
@@ -217,8 +285,10 @@ def make_vision(cfg: dict):
     kind = cfg.get("backend", "mock")
     env = {"ADSP_LIBRARY_PATH": cfg.get("adsp_library_path", "/usr/lib")}
     if kind == "vlm":
-        return VlmVision(cfg["vlm_command"], cfg.get("answer_after"), cfg.get("timeout_s", 30.0),
-                         cfg.get("workdir"), env)
+        return VlmVision(cfg["vlm_runner"], cfg["model_dir"], cfg["model_prefix"],
+                         cfg.get("workdir", "data/vlm"), cfg.get("seq_len", 330),
+                         cfg.get("timeout_s", 30.0), cfg.get("load_timeout_s", 90.0),
+                         {**env, "LD_LIBRARY_PATH": cfg.get("ld_library_path", "")})
     if kind == "encoder":
         return EncoderVision(cfg.get("refs_dir", "refs"), runner=cfg["runner"], model=cfg["encoder_model"],
                              size=cfg.get("size", 448), hidden=cfg.get("hidden"),

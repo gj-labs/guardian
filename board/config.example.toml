@@ -11,17 +11,21 @@ fps = 5
 [vision]
 backend = "vlm"                    # "vlm" | "encoder" | "mock"
 background_interval_s = 30
-adsp_library_path = "/usr/lib"
-timeout_s = 40
+adsp_library_path = "/usr/lib/dsp/cdsp:/usr/lib"
+timeout_s = 30
 
-# --- vlm: InternVL3-1B multimodal runner. Placeholders: {image} {prompt}.
-# The exact runner name and flags depend on the build from ventuno_executorch_source.tar.gz;
-# run it with --help and adjust. answer_after = text the runner prints just before the answer.
-vlm_command = "/home/arduino/executorch/cmake-out/examples/qualcomm/oss_scripts/llama/qnn_multimodal_runner --decoder_path /home/arduino/models/InternVL3-1B_QCS8275_ctxt_1000/InternVL3-1B_QCS8275_ctxt_1000.pte --encoder_path /home/arduino/models/InternVL3-1B_QCS8275_ctxt_1000/InternVL3-1B_QCS8275_ctxt_1000_vision_encoder_qnn.pte --embedding_path /home/arduino/models/InternVL3-1B_QCS8275_ctxt_1000/InternVL3-1B_QCS8275_ctxt_1000_tok_embedding_qnn.pte --tokenizer_path /home/arduino/models/InternVL3-1B_QCS8275_ctxt_1000/tokenizer.json --image_path {image} --prompt '{prompt}' --seq_len 1000"
-answer_after = ""
+# --- vlm: InternVL3-1B kept loaded in qnn_multimodal_persistent (from the track's ExecuTorch
+# source archive, extracted to ~/git/executorch). Measured on the board: 7.9 s load once,
+# ~1.4 s per check (0.86 s prefill, 37 tok/s decode), 574 MiB RSS.
+vlm_runner = "/home/arduino/git/executorch/examples/qualcomm/oss_scripts/llama/qnn_multimodal_persistent"
+ld_library_path = "/home/arduino/git/executorch/build-x86/lib/executorch/backends/qualcomm"
+model_dir = "/home/arduino/models/InternVL3-1B_QCS8275_ctxt_1000"
+model_prefix = "InternVL3-1B_QCS8275_ctxt_1000"
+workdir = "data/vlm"
+seq_len = 330                      # prompt (~280 tokens incl. image) + answer
 
 # --- encoder: vision encoder only + your reference photos (tools/capture_refs.py)
-runner = "/home/arduino/executorch/cmake-out/examples/qualcomm/executor_runner/qnn_executor_runner"
+runner = "/home/arduino/git/executorch/examples/qualcomm/executor_runner/qnn_executor_runner"
 encoder_model = "/home/arduino/models/InternVL3-1B_QCS8275_ctxt_1000/InternVL3-1B_QCS8275_ctxt_1000_vision_encoder_qnn.pte"
 refs_dir = "refs"
 size = 448
@@ -30,9 +34,10 @@ output_pattern = "output_{i}_0.raw"
 
 [fusion]
 checkin_s = 20
-verify_timeout_s = 45
+verify_timeout_s = 15
 
 [tts]
-piper_bin = "/home/arduino/piper/piper"
-piper_model = "/home/arduino/piper/en_US-lessac-medium.onnx"
+# Leave empty to use espeak-ng (apt). For a nicer voice install Piper and set both paths.
+piper_bin = ""
+piper_model = ""
 piper_rate = 22050
