@@ -270,6 +270,14 @@ def create_app(cfg: dict | None = None) -> FastAPI:
             raise HTTPException(404)
         return Response(snap, media_type="image/jpeg")
 
+    @app.get("/api/frame.jpg")
+    def frame():
+        """Latest camera frame, for aiming the camera (served only on the home network)."""
+        latest = g.camera.latest() if g.camera_active() else None
+        if latest is None:
+            raise HTTPException(404, "camera off")
+        return Response(jpeg(latest[1], 640), media_type="image/jpeg")
+
     @app.post("/api/ack")
     async def ack():
         await g.run(g.fusion.on_ok(time.monotonic(), by="caregiver"))
