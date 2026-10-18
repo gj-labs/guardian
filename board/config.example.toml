@@ -10,7 +10,7 @@ fps = 5
 
 [vision]
 backend = "vlm"                    # "vlm" | "encoder" | "mock"
-background_interval_s = 30
+background_interval_s = 0         # 0 = camera-only checks only after motion then stillness
 adsp_library_path = "/usr/lib/dsp/cdsp:/usr/lib"
 timeout_s = 30
 

@@ -194,9 +194,12 @@ class Guardian:
         if self.fusion.state != State.MONITORING or self.vision_busy:
             return False
         since = now - self.last_bg
+        # Camera-only checks run after "motion, then stillness" (what a fall looks like), so
+        # something that has lain still all along (a doll, a bag) never triggers them.
         if self.camera_active() and since > 5 and self.camera.burst_then_still(now):
             return True
-        return since > self.cfg["vision"]["background_interval_s"]
+        interval = self.cfg["vision"]["background_interval_s"]   # optional periodic check; 0 = off
+        return interval > 0 and since > interval
 
     # ------------------------------------------------------------ loops
     async def tick_loop(self) -> None:

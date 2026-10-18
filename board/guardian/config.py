@@ -13,7 +13,7 @@ DEFAULTS: dict = {
     "data_dir": "data",
     "bridge": "mock",                 # "router" on the VENTUNO Q, "mock" elsewhere
     "camera": {"device": "none", "fps": 5, "width": 640, "height": 480},  # device 0 for the USB cam
-    "vision": {"backend": "mock", "background_interval_s": 30, "keep_snapshots": True},
+    "vision": {"backend": "mock", "background_interval_s": 0, "keep_snapshots": True},
     "fusion": {"checkin_s": 20, "verify_timeout_s": 45, "settle_s": 1.5,
                "floor_confirmations": 2, "rearm_s": 10},
     "tts": {"piper_bin": "", "piper_model": "", "piper_rate": 22050},

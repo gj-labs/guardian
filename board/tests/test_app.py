@@ -70,3 +70,23 @@ def test_wearer_ok_from_watch(tmp_path):
         assert watch.receive_json()["type"] == "checkin"
         watch.send_json({"type": "ok"})
         wait_state(client, "MONITORING")
+
+
+def test_camera_only_checks_need_motion_then_stillness(tmp_path):
+    from guardian.app import Guardian
+
+    class StubCam:
+        active = True
+        moved = False
+
+        def burst_then_still(self, now):
+            return self.moved
+
+    g = Guardian(cfg(tmp_path))
+    g.cfg["vision"]["background_interval_s"] = 0
+    g.camera = StubCam()
+    assert not g._bg_due(1000.0)          # static scene (e.g. a doll on the floor): never checked
+    g.camera.moved = True
+    assert g._bg_due(1000.0)              # something fell and went still: check it
+    g.privacy = True
+    assert not g._bg_due(1000.0)          # camera paused: no checks
