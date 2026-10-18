@@ -1,112 +1,136 @@
-# Guardian: a private fall alert on Arduino VENTUNO Q
+# Guardian: private fall detection on Arduino VENTUNO Q
 
-ExecuTorch Hackathon, IoT track. Guardian detects falls at home, asks the person if they are OK, and
-alerts a caregiver only when they don't answer. Video never leaves the house.
+ExecuTorch Hackathon, IoT track. Guardian watches a room for falls, asks the person out loud
+whether they're OK, and alerts a family member's watch only if they stay down. It needs no
+wearable for the person at risk, and **video never leaves the house**.
 
-- **Wrist (M5Stack StopWatch):** spots a hard impact followed by stillness, vibrates and asks "Are you OK?", and plays speech
-  generated on the board. Tap for OK, or hold the yellow key for SOS.
-- **Camera + NPU (VENTUNO Q, Linux):** InternVL3-1B (ExecuTorch, QNN on the Hexagon NPU) checks the frame after the
-  impact: is a person on the floor? A dropped watch with the person standing is rejected. A person found on the floor
-  without a watch impact also triggers a check-in, after two background checks in a row.
-- **STM32H5 + Modulino Pixels:** the board's microcontroller owns the alarm lights and the countdown bar. A camera-on
-  privacy light is controlled by the MCU. If the Linux app stops sending heartbeats, the MCU shows a fault instead of "all quiet".
-- **Caregiver page:** a live status page and a hash-chained care log, served by the board on the home Wi-Fi.
+**How it works:**
+1. **Cheap triggers on the CPU, always on:** a loud **thud** on the USB camera's microphone,
+   or **motion followed by stillness** in the camera view (what a fall looks like).
+2. **NPU confirmation:** each trigger wakes one **InternVL3-1B** check on the Hexagon NPU (ExecuTorch + QNN):
+   *"Is a person lying, sitting or collapsed on the floor?"*. Nobody on the floor means a false alarm, which is logged and ignored.
+3. **Ask:** the board's speaker says *"Are you okay? … please get up"*. The NPU rechecks every 4 s.
+   If the person gets up, the incident is cancelled.
+4. **Alert:** still down after 20 s, the **family member's M5Stack StopWatch** vibrates, beeps and shows the
+   model's description. Tapping *"I'm on my way"* makes the board tell the person that help is coming.
+5. **STM32 + Modulino Pixels** show the state on the device itself. The microcontroller owns the light timing,
+   a camera-on privacy light, and a fault light if the Linux app stops sending heartbeats.
 
 ```text
-StopWatch ──Wi-Fi WebSocket──▶ FastAPI on VENTUNO Q ──▶ ExecuTorch runner ──QNN──▶ Hexagon NPU
-  (impact, OK, SOS)            fusion state machine          (InternVL3-1B / vision encoder)
-     ▲  check-in, speech       │  care log (SQLite, sha256 chain)
-     └─────────────────────────┤  Piper TTS (CPU)
-                               └─Arduino Bridge (msgpack-RPC)─▶ STM32H5 ──I2C──▶ Modulino Pixels
-Caregiver laptop ◀── http://<board>:8000 (status, log, acknowledge, pause camera)
+Brio camera ──frames──▶ motion-then-still (CPU) ─┐
+Brio mic ─────audio──▶ thud detector (CPU) ──────┤ trigger
+                                                 ▼
+                     FastAPI app on VENTUNO Q (state machine, care log)
+                         │ one stdin line per check       │ Arduino Bridge (msgpack-RPC)
+                         ▼                                ▼
+          qnn_multimodal_persistent (ExecuTorch)    STM32H5 ──I2C──▶ Modulino Pixels
+                         │ QNN HTP / FastRPC
+                         ▼
+                  Hexagon NPU: InternVL3-1B
+Board speaker ◀── espeak-ng / Piper (CPU)      Family StopWatch ◀── Wi-Fi WebSocket ──▶ "I'm on my way"
+Caregiver page ◀── http://<board>:8000         Camera aiming page ◀── http://<board>:8000/aim
 ```
 
-States: `MONITORING → VERIFYING (camera looks) → CHECKIN (20 s to tap OK) → ALERT (caregiver)`.
-A camera "upright" result returns to `MONITORING` and ignores impacts for 10 s.
+States: `MONITORING → VERIFYING (NPU looks) → CHECKIN (asks; 20 s, rechecks every 4 s) → ALERT (family watch)`.
 
 | Pixels | Meaning |
 |---|---|
-| pixel 0 dim green | monitoring; pixel 6 yellow = watch offline |
-| amber sweep | checking the camera |
-| amber bar shrinking | waiting for the wearer to tap OK |
-| all red flashing | caregiver alerted (latched until resolved) |
+| pixel 0 dim green | monitoring; pixel 6 yellow = family watch offline |
+| amber sweep | NPU is checking a trigger |
+| amber bar shrinking | asking the person to get up (countdown run by the MCU) |
+| all red flashing | family alerted (latched until they answer or the person gets up) |
 | pixel 0 blinking blue | Linux app not responding (MCU heartbeat timeout) |
 | pixel 7 white | camera is on |
+
+## Measured on the board (VENTUNO Q, QCS8275, QNN 2.49, ExecuTorch from the track archive)
+
+| Metric | Value |
+|---|---|
+| InternVL3-1B load (once, kept warm) | 7.9 s cold, 2.3 s cached |
+| One camera check (NPU) | **0.9–1.5 s** (prefill 0.86 s at 316 tok/s, decode 37 tok/s) |
+| Trigger → spoken check-in | 2.7 s (sound trigger, including a 1.5 s settle) |
+| Runner memory | 574 MiB RSS |
+| Empty floor | 1/1 "no" |
+| Person standing | 5/5 "no" |
+| Doll lying on the floor | 6/6 "yes": a known limitation, see below |
+| Person lying on the floor | *to be filled in on the demo setup* |
+
+**Known limitation:** the 1B model treats a doll on the floor as a person, and stricter prompts made it worse
+(7/12). Guardian handles this in the system design instead: camera triggers need motion followed by stillness,
+so an object that has lain still all along never triggers a check. A real person also gets the spoken
+check-in before anyone is alerted.
+
+## Models and runtime
+
+All are from the track's VENTUNO Q bundle (QCS8275, QNN).
+
+| Use | File |
+|---|---|
+| Fall check | `InternVL3-1B_QCS8275_ctxt_1000/`: `.pte` decoder, `_vision_encoder_qnn.pte`, `_tok_embedding_qnn.pte`, `tokenizer.json` |
+| Runner | `qnn_multimodal_persistent` from `ventuno_executorch_source.tar.gz` (extracted to `~/git/executorch`); loads the model once and serves one request per stdin line |
+| QNN runtime | `libqnn1`, `libqnn-dev`, `qnn-tools` 2.49 from the Qualcomm Ubuntu PPA (`ppa:ubuntu-qcom-iot/qcom-ppa`) |
+| Speech | espeak-ng (or Piper) on the CPU. These are not ExecuTorch models |
+
+Preprocessing matches the exporter: 448×448 RGB, ImageNet mean/std, float32 NCHW, written to a `.raw` file
+(`board/guardian/vision.py:preprocess`).
 
 ## Repository
 
 | Path | What |
 |---|---|
-| `board/guardian/` | Linux app: `fusion.py` (state machine), `vision.py` (NPU backends), `bridge.py` (router RPC), `camera.py`, `tts.py`, `store.py`, `app.py` (FastAPI), `static/index.html` (caregiver page) |
+| `board/guardian/` | Linux app: `fusion.py` (state machine), `vision.py` (NPU runner client), `audio.py` (thud detector), `camera.py` (capture + motion gate), `bridge.py` (router RPC), `tts.py` (speaker), `store.py` (hash-chained care log), `app.py` (FastAPI), `static/` (caregiver and aim pages) |
+| `board/tests/` | 17 tests: state machine, runner protocol with a fake runner, bridge protocol, thud detector, full app flow |
 | `board/tools/` | `fake_watch.py`, `capture_refs.py`, `bench_vision.py` |
-| `board/tests/` | state machine, bridge protocol, care log, encoder matching, full app flow (`pytest`) |
-| `mcu/guardian_mcu/` | STM32H5 sketch (Arduino App Lab), provides `guardian_set` over Bridge |
-| `watch/guardian_watch/` | StopWatch firmware (Arduino IDE, M5Unified) |
-
-## Models (from the track's VENTUNO Q bundle, QCS8275, QNN)
-
-| Use | File |
-|---|---|
-| Fall check (primary) | `InternVL3-1B_QCS8275_ctxt_1000/` decoder, `_vision_encoder_qnn.pte`, `_tok_embedding_qnn.pte`, tokenizer |
-| Fall check (fallback) | the vision encoder `.pte` alone, with `qnn_executor_runner` and your reference photos |
-| Runtime | built on the board from `source/ventuno_executorch_source.tar.gz` (see `Ventuno_Q_ExecuTorch_Bringup.pdf`) |
-
-Speech: [Piper](https://github.com/rhasspy/piper) on the CPU (not ExecuTorch), or `espeak-ng` as a fallback.
+| `board/guardian.service` | systemd user service (starts at boot) |
+| `mcu/guardian-mcu/` | Arduino App for the STM32: sketch (`guardian_set` over Bridge, Pixels) |
+| `watch/guardian_watch/` | StopWatch firmware: the family alert |
 
 ## Setup
 
-### 1. Board (VENTUNO Q, Ubuntu)
+### 1. Board (VENTUNO Q, Ubuntu 24.04)
 ```bash
-git clone <this repo> ~/guardian-iot && cd ~/guardian-iot/board
-cp config.example.toml config.toml        # edit paths, see below
-sudo apt install -y python3-venv espeak-ng
-./run.sh                                  # http://<board-ip>:8000
+sudo add-apt-repository -y ppa:ubuntu-qcom-iot/qcom-ppa && sudo apt update
+sudo apt install -y libqnn1 libqnn-dev qnn-tools python3.12-venv espeak-ng
+tar -xzf ventuno_executorch_source.tar.gz -C ~          # -> ~/git/executorch (track bundle)
+# copy InternVL3-1B_QCS8275_ctxt_1000/ to ~/models/
+git clone https://github.com/gj-labs/guardian.git ~/guardian && cd ~/guardian/board
+cp config.example.toml config.toml                       # check camera/mic/speaker devices
+mkdir -p ~/.config/systemd/user && cp guardian.service ~/.config/systemd/user/
+systemctl --user daemon-reload && systemctl --user enable --now guardian
 ```
-Then in `config.toml`:
-1. Build the runner(s) from the track source archive and point `vlm_command` / `runner` at them. Run each with
-   `--help` and match the flags; the `vlm_command` in the example is a template, not a verified command line.
-2. Check the NPU path: `ADSP_LIBRARY_PATH`, then `bench_vision.py` on a few photos.
-3. If the multimodal runner is not working, use `backend = "encoder"` and capture references:
-   `python tools/capture_refs.py floor 15`, `... upright 15`, `... empty 5`.
+Open `http://<board-ip>:8000` (caregiver page) and `http://<board-ip>:8000/aim` to point the camera at the floor.
+Device names: `arecord -l` (mic, e.g. `plughw:1,0` for the Brio 101), `wpctl status` (speaker: pair a
+Bluetooth speaker or plug in a USB one; `speaker = "default"` uses PipeWire's default output).
 
 ### 2. STM32 + Pixels
-Open `mcu/guardian_mcu/guardian_mcu.ino` in Arduino App Lab, add the `Arduino_Modulino` library, and plug the Pixels into the
-Qwiic port. If the Pixels stay dark, change `MODULINO_WIRE` (Wire / Wire1) to the bus that the Qwiic port uses on the VENTUNO Q.
-Set `bridge = "router"` in `config.toml`. Without the app running you should see pixel 0 blink blue (heartbeat timeout).
+Plug the Modulino Pixels into the Qwiic port, then on the board:
+```bash
+~/guardian/mcu/deploy.sh                                          # builds + flashes via arduino-app-cli
+arduino-app-cli properties set default ~/ArduinoApps/guardian-mcu  # start at boot
+```
 
-### 3. StopWatch
-Arduino IDE → install the M5Stack board package and the libraries `M5Unified`, `WebSockets` (Markus Sattler) and
-`ArduinoJson`. Copy `config.example.h` to `config.h` with your Wi-Fi and the board's IP, then flash.
+### 3. Family StopWatch
+On a computer with `arduino-cli`, the M5Stack board package and the libraries `M5Unified`, `WebSockets` and `ArduinoJson`:
+copy `watch/guardian_watch/config.example.h` to `config.h` (Wi-Fi + board IP), then compile and upload for the StopWatch.
 
-### Off-board (laptop) rehearsal
+### Off-board rehearsal (laptop, all mocks)
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -r board/requirements.txt
-cd board && ../.venv/bin/python -m pytest          # 14 tests
-../.venv/bin/uvicorn guardian.app:app --port 8000  # all mocks; use the dashboard's rehearsal buttons
-../.venv/bin/python tools/fake_watch.py            # optional: a typed stand-in for the watch
+cd board && ../.venv/bin/python -m pytest
+../.venv/bin/uvicorn guardian.app:app --port 8000   # dashboard rehearsal buttons drive the flow
 ```
 
 ## Demo (about 2 minutes)
-1. **False alarm rejected:** drop the watch on the table. The Pixels sweep amber, the camera sees a person standing, and the system goes back to green.
-2. **Real fall:** lie on the mat. The watch vibrates and asks out loud, the Pixels count down, nobody taps, then the Pixels flash red and the
-   caregiver page shows the description, snapshot and latency.
-3. **I'm OK:** fall again and tap the watch. Everything clears.
-4. **Privacy:** "Pause camera" on the caregiver page turns the MCU's camera light off. The watch still protects.
-
-## Measurements (fill in on the board)
-
-| Metric | Value |
-|---|---|
-| Vision check latency, p50 / p95 (`bench_vision.py`) | |
-| Impact → check-in on the watch | |
-| Check-in timeout → caregiver alert | 20 s by design |
-| Fall test: falls caught / missed, false alarms (20 trials each) | |
-| NPU delegation (`qnn_executor_runner --profile_level 1`) | |
-| Peak RSS of the runner | |
+1. **False alarm:** drop a bag near someone standing. The mic triggers and the Pixels sweep amber; the NPU sees nobody on the floor, so it goes back to green and the watch shows "False alarm".
+2. **Fall:** a teammate lies down on the mat. Guardian asks out loud, the Pixels count down, then the family watch buzzes with the model's
+   description and the caregiver page shows the snapshot and latency.
+3. **I'm on my way:** tap the watch. The board says help is coming.
+4. **Gets up:** repeat, and stand up during the countdown. The NPU recheck cancels the incident.
+5. **Privacy:** "Pause camera" turns off the MCU's camera light.
 
 ## Privacy
-Frames stay on the board. Only the alert snapshot is stored (set `keep_snapshots = false` to disable), in the
-board's local care log. The camera-on light is driven by the MCU from the app's real camera state.
+Camera frames and audio are processed in memory on the board and are not stored. Only the alert snapshot is kept
+(`keep_snapshots = false` disables it), in a local, hash-chained care log. Nothing is sent to the cloud.
 
 ## Team
 - Name, email
