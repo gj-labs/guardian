@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Guardian Caregiver</title>
+<style>
+:root {
+  --bg: #f6f7f9; --card: #ffffff; --text: #16181d; --muted: #5d6470; --line: #e3e6eb;
+  --ok: #1f8a4c; --ok-bg: #e6f4ec; --warn: #a86400; --warn-bg: #fdf1dc;
+  --bad: #c62828; --bad-bg: #fde7e7; --info: #2457c5; --info-bg: #e7eefc;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #111317; --card: #1a1d23; --text: #eceef2; --muted: #9aa2ae; --line: #2a2f37;
+    --ok: #4cc27f; --ok-bg: #16301f; --warn: #f0a63a; --warn-bg: #33270f;
+    --bad: #ff6b6b; --bad-bg: #3a1717; --info: #7aa2ff; --info-bg: #17223a; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text);
+  font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 980px; margin: 0 auto; padding: 20px 16px 40px; }
+header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+h1 { font-size: 22px; margin: 0; }
+.sub { color: var(--muted); font-size: 13px; }
+.grid { display: grid; grid-template-columns: 1.4fr 1fr; gap: 16px; margin-top: 16px; }
+@media (max-width: 760px) { .grid { grid-template-columns: 1fr; } }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; }
+.card h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 10px; }
+#state { border-radius: 12px; padding: 22px; transition: background .2s; }
+#state .label { font-size: 30px; font-weight: 700; }
+#state .detail { margin-top: 6px; color: var(--muted); }
+#state.MONITORING { background: var(--ok-bg); } #state.MONITORING .label { color: var(--ok); }
+#state.VERIFYING, #state.CHECKIN { background: var(--warn-bg); }
+#state.VERIFYING .label, #state.CHECKIN .label { color: var(--warn); }
+#state.ALERT { background: var(--bad-bg); animation: pulse 1s infinite; } #state.ALERT .label { color: var(--bad); }
+@keyframes pulse { 50% { filter: brightness(1.08); } }
+#snap { width: 100%; border-radius: 8px; margin-top: 12px; display: none; }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.chip { border-radius: 999px; padding: 4px 10px; font-size: 13px; background: var(--info-bg); color: var(--info); }
+.chip.ok { background: var(--ok-bg); color: var(--ok); } .chip.bad { background: var(--bad-bg); color: var(--bad); }
+.chip.warn { background: var(--warn-bg); color: var(--warn); }
+button { font: inherit; border: 1px solid var(--line); background: var(--card); color: var(--text);
+  border-radius: 8px; padding: 8px 12px; cursor: pointer; }
+button.primary { background: var(--bad); color: #fff; border-color: transparent; }
+button:disabled { opacity: .5; cursor: default; }
+.row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+td { padding: 6px 4px; border-top: 1px solid var(--line); vertical-align: top; }
+td.t { color: var(--muted); white-space: nowrap; width: 1%; }
+dl { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; margin: 0; font-size: 14px; }
+dt { color: var(--muted); } dd { margin: 0; font-variant-numeric: tabular-nums; }
+#dev { display: none; }
+.log-wrap { max-height: 380px; overflow: auto; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <h1>Guardian</h1>
+      <div class="sub">Private fall alert · video never leaves this home</div>
+    </div>
+    <div class="sub" id="conn">connecting…</div>
+  </header>
+
+  <div class="grid">
+    <section>
+      <div id="state" class="MONITORING">
+        <div class="label" id="stateLabel">Monitoring</div>
+        <div class="detail" id="stateDetail">All quiet.</div>
+      </div>
+      <img id="snap" alt="Incident snapshot from the home camera">
+      <div class="row">
+        <button class="primary" id="ack" disabled>Mark resolved</button>
+        <button id="privacy">Pause camera</button>
+      </div>
+
+      <div class="card" style="margin-top:16px">
+        <h2>Care log</h2>
+        <div class="log-wrap"><table id="log"></table></div>
+        <div class="sub" id="chain"></div>
+      </div>
+    </section>
+
+    <section style="display:grid; gap:16px; align-content:start">
+      <div class="card">
+        <h2>Devices</h2>
+        <div class="chips" id="chips"></div>
+      </div>
+      <div class="card">
+        <h2>Last camera check</h2>
+        <dl id="vision"><dt>Result</dt><dd>none yet</dd></dl>
+      </div>
+      <div class="card">
+        <h2>Latency</h2>
+        <dl id="metrics"><dt>-</dt><dd>no incident yet</dd></dl>
+      </div>
+      <div class="card" id="dev">
+        <h2>Rehearsal (dev mode)</h2>
+        <div class="row" style="margin-top:0">
+          <button data-sim="impact">Watch impact</button>
+          <button data-sim="ok">Wearer taps OK</button>
+          <button data-sim="sos">SOS button</button>
+          <button id="floor">Mock: person on floor</button>
+        </div>
+      </div>
+    </section>
+  </div>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const LABELS = { MONITORING: "Monitoring", VERIFYING: "Checking camera…", CHECKIN: "Asking wearer", ALERT: "Help needed" };
+let status = null;
+
+function fmtTime(t) { return new Date(t * 1000).toLocaleTimeString(); }
+function esc(s) { return String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
+
+function describe(s) {
+  const inc = s.incident || {};
+  const v = inc.vision || {};
+  if (s.state === "MONITORING") return s.camera.privacy ? "Camera paused for privacy. Watch still protects." : "All quiet.";
+  if (s.state === "VERIFYING") return `Wrist impact (${(inc.peak_g || 0).toFixed(1)} g). Looking with the camera…`;
+  if (s.state === "CHECKIN") return `${v.description || "Possible fall."} Waiting for the wearer: ${Math.ceil(s.countdown)} s`;
+  return (inc.source === "sos" ? "SOS button held on the watch." : (v.description || "No response after a possible fall.")) + " Go check now.";
+}
+
+function chip(text, cls) { return `<span class="chip ${cls}">${esc(text)}</span>`; }
+
+function render(s) {
+  status = s;
+  $("state").className = s.state;
+  $("stateLabel").textContent = LABELS[s.state] || s.state;
+  $("stateDetail").textContent = describe(s);
+  $("ack").disabled = s.state === "MONITORING";
+  $("privacy").textContent = s.camera.privacy ? "Resume camera" : "Pause camera";
+  $("chips").innerHTML = [
+    chip(s.watch.online ? `Watch online${s.watch.battery != null ? " · " + s.watch.battery + "%" : ""}` : "Watch offline", s.watch.online ? "ok" : "bad"),
+    chip(!s.camera.enabled ? "Camera off (config)" : s.camera.privacy ? "Camera paused" : s.camera.active ? "Camera on" : "Camera error", s.camera.active ? "ok" : (s.camera.privacy ? "warn" : "bad")),
+    chip(s.mcu.mock ? "Pixels: mock bridge" : (s.mcu.ok ? "Pixels: STM32 linked" : "Pixels: link down"), s.mcu.mock ? "warn" : (s.mcu.ok ? "ok" : "bad")),
+    chip(`Vision: ${s.vision.backend}${s.vision.busy ? " (running)" : ""}`, s.vision.backend === "mock" ? "warn" : "ok"),
+    chip(`Voice: ${s.tts}`, s.tts === "none" ? "warn" : "ok"),
+  ].join("");
+  const v = s.vision.last;
+  $("vision").innerHTML = v ? `<dt>Person on floor</dt><dd>${v.on_floor === null ? "check failed" : v.on_floor ? "yes" : "no"}</dd>
+    <dt>Description</dt><dd>${esc(v.description)}</dd><dt>Model time</dt><dd>${v.latency_ms} ms (${esc(v.backend)})</dd>
+    <dt>At</dt><dd>${fmtTime(v.t)}</dd>` : "<dt>Result</dt><dd>none yet</dd>";
+  const m = s.metrics, rows = [["Camera check", m.vision_ms], ["Trigger → ask wearer", m.trigger_to_checkin_ms], ["Trigger → caregiver alert", m.trigger_to_alert_ms]]
+    .filter(([, x]) => x != null).map(([k, x]) => `<dt>${k}</dt><dd>${x} ms</dd>`).join("");
+  $("metrics").innerHTML = rows || "<dt>-</dt><dd>no incident yet</dd>";
+  $("dev").style.display = s.dev ? "block" : "none";
+  const mf = s.vision.mock_on_floor;
+  $("floor").style.display = mf === null ? "none" : "";
+  $("floor").textContent = mf ? "Mock: person upright" : "Mock: person on floor";
+}
+
+async function loadLog() {
+  const r = await fetch("/api/events?limit=60").then(r => r.json());
+  $("log").innerHTML = r.events.map(e => `<tr><td class="t">${fmtTime(e.t)}</td><td><b>${esc(e.kind)}</b>
+    ${esc(Object.entries(e.data).filter(([k]) => k !== "incident").map(([k, x]) => `${k}: ${typeof x === "object" ? JSON.stringify(x) : x}`).join(" · "))}</td></tr>`).join("");
+  $("chain").textContent = r.chain_ok ? "Log hash chain verified." : "Log hash chain BROKEN: entries were changed.";
+  const alert = r.events.find(e => e.kind === "caregiver_alert" && e.has_snapshot);
+  if (alert && status && status.state === "ALERT") { $("snap").src = `/api/snapshot/${alert.id}.jpg`; $("snap").style.display = "block"; }
+  else if (!status || status.state === "MONITORING") $("snap").style.display = "none";
+}
+
+function connect() {
+  const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws/dash`);
+  ws.onopen = () => { $("conn").textContent = "live"; loadLog(); };
+  ws.onclose = () => { $("conn").textContent = "reconnecting…"; setTimeout(connect, 1500); };
+  ws.onmessage = (ev) => {
+    const msg = JSON.parse(ev.data);
+    if (msg.type === "status") { const changed = !status || status.state !== msg.state; render(msg); if (changed) loadLog(); }
+    else if (msg.type === "event") loadLog();
+  };
+}
+
+const post = (url, body) => fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: body ? JSON.stringify(body) : undefined })
+  .then(r => r.json()).then(s => s.state && render(s));
+$("ack").onclick = () => post("/api/ack");
+$("privacy").onclick = () => post("/api/privacy", { on: !status.camera.privacy });
+$("floor").onclick = () => post("/api/sim/floor", { on: !status.vision.mock_on_floor });
+document.querySelectorAll("[data-sim]").forEach(b => b.onclick = () => post(`/api/sim/${b.dataset.sim}`));
+connect();
+</script>
+</body>
+</html>

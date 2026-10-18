@@ -1,0 +1,17 @@
+# Optional: start Guardian on boot.
+#   sudo cp guardian.service /etc/systemd/system/ && sudo systemctl enable --now guardian
+# Edit User and WorkingDirectory to match where you cloned the repo.
+[Unit]
+Description=Guardian fall alert
+After=network-online.target arduino-router.service
+Wants=network-online.target
+
+[Service]
+User=arduino
+WorkingDirectory=/home/arduino/guardian-iot/board
+ExecStart=/home/arduino/guardian-iot/board/run.sh
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
