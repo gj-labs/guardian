@@ -58,6 +58,7 @@ class Guardian:
         self.vision_busy = False
         self.last_vision: dict | None = None
         self.last_motion_trigger = 0.0
+        self._last_logged_check: tuple | None = None
         self.metrics: dict = {}
         self.mcu_error: str | None = None
         self._tasks: list[asyncio.Task] = []
@@ -185,7 +186,11 @@ class Guardian:
             got = self.camera.frame_after(after)
             frame = got[1] if got else None
         res = await self._check(frame)
-        self.store.add("vision", {**res, "trigger": "recheck" if recheck else "verify"})
+        # Rechecks repeat every few seconds: log only when the answer changes.
+        key = (res["on_floor"], res["description"])
+        if not recheck or key != self._last_logged_check:
+            self.store.add("vision", {**res, "trigger": "recheck" if recheck else "verify"})
+        self._last_logged_check = key
         await self.run(self.fusion.on_vision(time.monotonic(), res["on_floor"], res["description"]))
 
     # ------------------------------------------------------------ CPU triggers
