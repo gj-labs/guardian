@@ -42,7 +42,7 @@ verify_timeout_s = 15
 recheck_s = 4                      # camera recheck interval while asking / alerting
 
 [tts]
-speaker = "plughw:0,0"             # board audio out (aplay -l); "none" = silent
+speaker = "default"                # PipeWire default output (pair a Bluetooth or plug a USB speaker); "none" = silent
 # Leave empty to use espeak-ng (apt). For a nicer voice install Piper and set both paths.
 piper_bin = ""
 piper_model = ""

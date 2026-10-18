@@ -7,4 +7,6 @@ if [ ! -x .venv/bin/uvicorn ]; then
   .venv/bin/pip install -q -r requirements.txt
 fi
 export ADSP_LIBRARY_PATH="${ADSP_LIBRARY_PATH:-/usr/lib}"
+# Reach the desktop session's PipeWire (Bluetooth / USB speakers) even when started over ssh/adb.
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 exec .venv/bin/uvicorn guardian.app:app --host 0.0.0.0 --port "${PORT:-8000}"
