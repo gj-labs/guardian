@@ -13,6 +13,7 @@ wearable for the person at risk, and **video never leaves the house**.
    If the person gets up, the incident is cancelled.
 4. **Alert:** still down after 20 s, the **family member's M5Stack StopWatch** vibrates, beeps and shows the
    model's description. Tapping *"I'm on my way"* makes the board tell the person that help is coming.
+   If nobody answers the watch within **60 s**, Guardian **sends an SMS** (text only) to backup contacts.
 5. **STM32 + Modulino Pixels** show the state on the device itself. The microcontroller owns the light timing,
    a camera-on privacy light, and a fault light if the Linux app stops sending heartbeats.
 
@@ -74,7 +75,7 @@ States: `MONITORING → VERIFYING (NPU looks) → CHECKIN (asks; 20 s, rechecks 
 | 🗣️ **Voice** | Spoken check-in | espeak-ng (or Piper) text-to-speech through PipeWire | *"Are you okay? … please get up."* |
 | 🧬 **Nervous system** | Linux-to-microcontroller link | Arduino Bridge (MessagePack-RPC through `arduino-router`) to the **STM32H5** (Zephyr), heartbeat every second | Carries decisions to the hardware. If the brain stops, the MCU shows a fault |
 | 🚨 **Face** | Status lights | **Modulino Pixels** (8 RGB LEDs over Qwiic/I2C), driven by the STM32 | Green = calm, amber = checking or countdown, red = family alerted, white = camera on |
-| 📣 **Messenger** | The family's wrist | **M5Stack StopWatch** (ESP32-S3) over a Wi-Fi WebSocket; finds the board by name (`qcventuno001.local`) | Buzzes and shows what the camera saw; a tap means *"I'm on my way"* |
+| 📣 **Messenger** | The family's wrist, then SMS | **M5Stack StopWatch** (ESP32-S3) over a Wi-Fi WebSocket; finds the board by name (`qcventuno001.local`) | Buzzes and shows what the camera saw; a tap means *"I'm on my way"*. Unanswered for 60 s: Twilio SMS to backup contacts |
 | 📒 **Memory** | Care log | SQLite with a SHA-256 hash chain; keeps only the alert snapshot | Tamper-evident history for the caregiver |
 | 🪟 **Window** | Caregiver page | FastAPI web page plus a live `/aim` camera view | Live state, the NPU's answer, latency and the log |
 | ❤️ **Immune system** | Self-healing | systemd user service, plus the STM32 app as the board's default app; dark-frame guard | Restarts on its own after a power cut. A dark picture never gets a guess; Guardian asks instead |
@@ -171,7 +172,15 @@ cd board && ../.venv/bin/python -m pytest
 
 ## Privacy
 Camera frames and audio are processed in memory on the board and are not stored. Only the alert snapshot is kept
-(`keep_snapshots = false` disables it), in a local, hash-chained care log. Nothing is sent to the cloud.
+(`keep_snapshots = false` disables it), in a local, hash-chained care log. The only thing that ever leaves the house
+is the optional escalation SMS: a one-line description and the time, sent via Twilio after an unanswered alert.
+
+**SMS setup** (optional): set `provider = "twilio"`, `from` and `to` in `[sms]` of `board/config.toml`, and put the
+credentials in `~/.config/guardian.env` on the board (read by the service, never committed):
+```bash
+printf 'TWILIO_ACCOUNT_SID=AC...\nTWILIO_AUTH_TOKEN=...\n' > ~/.config/guardian.env && chmod 600 ~/.config/guardian.env
+systemctl --user restart guardian
+```
 
 ## Team
 - Name, email

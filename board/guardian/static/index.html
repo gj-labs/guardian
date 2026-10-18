@@ -140,6 +140,8 @@ function render(s) {
     chip(s.mcu.mock ? "Pixels: mock bridge" : (s.mcu.ok ? "Pixels: STM32 linked" : "Pixels: link down"), s.mcu.mock ? "warn" : (s.mcu.ok ? "ok" : "bad")),
     chip(`Vision: ${s.vision.backend}${s.vision.busy ? " (running)" : ""}`, s.vision.backend === "mock" ? "warn" : "ok"),
     chip(`Speaker: ${s.speaker === "none" ? "off" : s.tts}`, s.speaker === "none" || s.tts === "none" ? "warn" : "ok"),
+    chip(s.sms.provider === "twilio" ? (s.sms.ready ? `SMS backup: ${s.sms.recipients} contact(s) after ${s.sms.after_s} s` : "SMS backup: not configured")
+         : "SMS backup: log only", s.sms.provider === "twilio" && s.sms.ready ? "ok" : "warn"),
   ].join("");
   const v = s.vision.last;
   $("vision").innerHTML = v ? `<dt>Person on floor</dt><dd>${v.on_floor === null ? "check failed" : v.on_floor ? "yes" : "no"}</dd>

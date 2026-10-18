@@ -15,7 +15,11 @@ DEFAULTS: dict = {
     "camera": {"device": "none", "fps": 5, "width": 640, "height": 480},  # device 0 for the USB cam
     "vision": {"backend": "mock", "keep_snapshots": True},
     "mic": {"device": "none", "rise_db": 22.0, "min_dbfs": -32.0},   # "plughw:1,0" = Brio 101 mic
-    "fusion": {"checkin_s": 20, "verify_timeout_s": 15, "settle_s": 1.5, "recheck_s": 4, "rearm_s": 10},
+    "fusion": {"checkin_s": 20, "verify_timeout_s": 15, "settle_s": 1.5, "recheck_s": 4, "rearm_s": 10,
+               "escalate_s": 60},
+    # SMS when nobody answers the watch alert. provider "log" only records it; "twilio" sends it
+    # (TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN env vars on the board).
+    "sms": {"provider": "log", "from": "", "to": [], "place": "home"},
     "tts": {"piper_bin": "", "piper_model": "", "piper_rate": 22050, "speaker": "none"},
     "watch": {"offline_after_s": 10},
 }

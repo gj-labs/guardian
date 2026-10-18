@@ -21,6 +21,7 @@ from .bridge import MockBridge, make_bridge
 from .audio import Microphone
 from .camera import Camera, jpeg
 from .fusion import PHRASES, Effect, Fusion, FusionConfig, State
+from .sms import make_sms, message as sms_message
 from .store import Store
 from .tts import Speech
 from .vision import MockVision, make_vision, parse_yes_no
@@ -45,6 +46,7 @@ class Guardian:
         self.vision = make_vision(cfg["vision"])
         t = cfg["tts"]
         self.speech = Speech(t["piper_bin"] or None, t["piper_model"] or None, t["piper_rate"], t["speaker"])
+        self.sms = make_sms(cfg["sms"])
         mic = cfg["mic"]
         self.mic = None if mic["device"] == "none" else Microphone(
             mic["device"], self._on_thud, rise_db=mic["rise_db"], min_dbfs=mic["min_dbfs"])
@@ -91,6 +93,8 @@ class Guardian:
                                                    else round(self.mic.level_db, 1)},
             "tts": self.speech.engine,
             "speaker": self.speech.speaker,
+            "sms": {"provider": self.sms.name, "ready": self.sms.ready, "recipients": len(self.cfg["sms"]["to"]),
+                    "after_s": self.fusion.cfg.escalate_s},
             "metrics": self.metrics,
             "dev": self.cfg["dev"],
         }
@@ -145,6 +149,8 @@ class Guardian:
                 eid = self.store.add(kind, data, snap)
                 await self.broadcast({"type": "event", "event": {"id": eid, "t": time.time(), "kind": kind,
                                                                  "data": data, "has_snapshot": snap is not None}})
+            elif fx.kind == "sms":
+                asyncio.create_task(self.send_sms(fx.data["text"], fx.data["unanswered_s"]))
             elif fx.kind == "verify":
                 asyncio.create_task(self.verify(fx.data["after"], fx.data.get("recheck", False)))
 
@@ -192,6 +198,17 @@ class Guardian:
             self.store.add("vision", {**res, "trigger": "recheck" if recheck else "verify"})
         self._last_logged_check = key
         await self.run(self.fusion.on_vision(time.monotonic(), res["on_floor"], res["description"]))
+
+    async def send_sms(self, description: str, unanswered_s: int) -> None:
+        """Escalation: nobody answered the watch alert. Text only, never images."""
+        text = sms_message(description, unanswered_s, self.cfg["sms"]["place"])
+        results = await asyncio.to_thread(self.sms.send, text)
+        ok = all(r["ok"] for r in results)
+        eid = self.store.add("sms_sent" if ok else "sms_failed",
+                             {"provider": self.sms.name, "results": results, "text": text})
+        await self.broadcast({"type": "event", "event": {"id": eid, "t": time.time(),
+                                                         "kind": "sms_sent" if ok else "sms_failed",
+                                                         "data": {"provider": self.sms.name}, "has_snapshot": False}})
 
     # ------------------------------------------------------------ CPU triggers
     def _on_thud(self, now: float, level_db: float) -> None:

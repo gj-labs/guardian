@@ -152,3 +152,41 @@ def test_thud_detector_fires_on_loud_transient_only():
     assert d.feed(t + 0.05, -20.0)                         # thud: +35 dB
     assert not d.feed(t + 1.0, -20.0)                      # cooldown
     assert d.feed(t + 6.0, -20.0)
+
+
+def test_twilio_sms_request_and_error_handling():
+    import base64
+    import json as _json
+    import urllib.parse
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    from guardian.sms import TwilioSms, message
+
+    got = []
+
+    class H(BaseHTTPRequestHandler):
+        def do_POST(self):
+            body = urllib.parse.parse_qs(self.rfile.read(int(self.headers["Content-Length"])).decode())
+            got.append((self.path, self.headers["Authorization"], body))
+            code = 400 if body["To"][0] == "+15550000002" else 201
+            self.send_response(code)
+            self.end_headers()
+            self.wfile.write(_json.dumps({"sid": "SM123"}).encode())
+
+        def log_message(self, *a):
+            pass
+
+    srv = HTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    sms = TwilioSms("+15550000000", ["+15550000001", "+15550000002"], "ACxx", "tok",
+                    api_base=f"http://127.0.0.1:{srv.server_port}")
+    text = message("Yes, the person is lying on the floor.", 75, "home")
+    res = sms.send(text)
+    srv.shutdown()
+    assert res[0] == {"to": "+15550000001", "ok": True, "sid": "SM123"}
+    assert res[1]["ok"] is False and "HTTP 400" in res[1]["error"]
+    path, auth, body = got[0]
+    assert path == "/2010-04-01/Accounts/ACxx/Messages.json"
+    assert auth == "Basic " + base64.b64encode(b"ACxx:tok").decode()
+    assert body["From"] == ["+15550000000"] and "possible fall" in body["Body"][0]
+    assert not TwilioSms("+1", ["+2"], "", "").send("x")[0]["ok"]      # missing credentials: no request

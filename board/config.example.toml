@@ -40,6 +40,15 @@ min_dbfs = -32
 checkin_s = 20                     # time to get up before the family is alerted
 verify_timeout_s = 15
 recheck_s = 4                      # camera recheck interval while asking / alerting
+escalate_s = 60                    # watch alert unanswered this long -> SMS backup contacts (0 = off)
+
+[sms]
+# Text-only escalation (no images). "log" = record only; "twilio" = send. Put the Twilio credentials in
+# ~/.config/guardian.env on the board (TWILIO_ACCOUNT_SID=..., TWILIO_AUTH_TOKEN=...), not in this file.
+provider = "log"
+from = "+15550000000"              # your Twilio number
+to = ["+15551234567"]              # backup contacts, E.164 format
+place = "home"
 
 [tts]
 speaker = "default"                # PipeWire default output (pair a Bluetooth or plug a USB speaker); "none" = silent

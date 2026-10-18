@@ -87,3 +87,34 @@ def test_family_ack_clears_and_tells_the_person():
     assert f.state == State.MONITORING and speaks(fx) == [ACK_TEXT]
     assert f.on_family_ack(31.0) == []
     assert f.on_trigger(32.0, "sound")[0].data["state"] == "VERIFYING"   # no rearm after a real incident
+
+
+def test_unanswered_alert_escalates_to_sms_once():
+    f = make()
+    f.cfg.escalate_s = 60
+    f.on_trigger(0.0, "motion")
+    f.tick(0.1)
+    f.on_vision(1.0, True, "Yes, the person is lying on the floor.")
+    f.tick(21.5)
+    assert f.state == State.ALERT
+    assert not any(e.kind == "sms" for e in f.tick(60.0))           # 38.5 s into the alert
+    fx = f.tick(81.6)
+    sms = [e for e in fx if e.kind == "sms"]
+    assert len(sms) == 1 and "lying" in sms[0].data["text"]
+    assert not any(e.kind == "sms" for e in f.tick(120.0))          # only once per incident
+    f.on_family_ack(130.0)
+    f.on_trigger(140.0, "motion")                                   # a new incident can escalate again
+    f.tick(140.1)
+    f.on_vision(141.0, True)
+    f.tick(161.5)
+    assert any(e.kind == "sms" for e in f.tick(221.6))
+
+
+def test_answered_alert_never_escalates():
+    f = make()
+    f.on_trigger(0.0, "motion")
+    f.tick(0.1)
+    f.on_vision(1.0, True)
+    f.tick(21.5)
+    f.on_family_ack(30.0)
+    assert not any(e.kind == "sms" for e in f.tick(200.0))

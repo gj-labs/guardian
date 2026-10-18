@@ -9,6 +9,8 @@ After=network-online.target pipewire.service
 
 [Service]
 WorkingDirectory=%h/guardian/board
+# Optional secrets (e.g. TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN for SMS escalation):
+EnvironmentFile=-%h/.config/guardian.env
 ExecStart=%h/guardian/board/run.sh
 Restart=always
 RestartSec=3

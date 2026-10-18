@@ -22,7 +22,7 @@ class State(IntEnum):
 
 @dataclass
 class Effect:
-    kind: str                 # "state" | "watch" | "speak" | "log" | "verify"
+    kind: str                 # "state" | "watch" | "speak" | "log" | "verify" | "sms"
     data: dict[str, Any] = field(default_factory=dict)
 
 
@@ -33,6 +33,7 @@ class FusionConfig:
     settle_s: float = 1.5            # wait after a thud before looking (person comes to rest)
     recheck_s: float = 4.0           # how often the camera rechecks during the check-in and alert
     rearm_s: float = 10.0            # ignore triggers this long after a rejected (person upright) check
+    escalate_s: float = 60.0         # alert unanswered this long -> SMS to the backup contacts (0 = off)
 
 
 CHECKIN_TEXT = "Are you okay? I noticed a fall. If you are okay, please get up. Otherwise I will alert your family."
@@ -51,6 +52,7 @@ class Fusion:
         self._rearm_until = 0.0
         self._verify_at: float | None = None
         self._recheck_at: float | None = None
+        self._escalated = False
 
     # ------------------------------------------------------------ helpers
     def _go(self, state: State, now: float, **log) -> list[Effect]:
@@ -69,6 +71,7 @@ class Fusion:
         was = self.state.name
         self.incident = None
         self._recheck_at = None
+        self._escalated = False
         fx = self._go(State.MONITORING, now, reason=reason, was=was)
         fx.append(Effect("watch", {"type": "clear", "text": reason}))
         if speak:
@@ -141,6 +144,12 @@ class Fusion:
             if now - self.since > self.cfg.verify_timeout_s:
                 return self._checkin(now, "camera check timed out")
             return []
+        if (self.state == State.ALERT and not self._escalated and self.cfg.escalate_s > 0
+                and now - self.since >= self.cfg.escalate_s):
+            self._escalated = True
+            desc = ((self.incident or {}).get("vision") or {}).get("description") or "Possible fall."
+            return [Effect("sms", {"text": desc, "unanswered_s": round(now - self.since)}),
+                    Effect("log", {"kind": "escalated", "unanswered_s": round(now - self.since)})]
         if self.state == State.CHECKIN and self.countdown_left(now) <= 0:
             self._recheck_at = now + self.cfg.recheck_s
             return self._alert(now, "still on the floor after the check-in")

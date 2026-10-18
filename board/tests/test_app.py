@@ -84,3 +84,20 @@ def test_camera_triggers_need_motion_then_stillness(tmp_path):
     assert g._motion_due(1000.0)          # something fell and went still: check it
     g.privacy = True
     assert not g._motion_due(1000.0)      # camera paused: no checks
+
+
+def test_unanswered_alert_sends_sms(tmp_path):
+    c = cfg(tmp_path, escalate_s=0.5)
+    c["sms"]["to"] = ["+15550000001"]
+    app = create_app(c)
+    g = app.state.g
+    with TestClient(app) as client:
+        client.post("/api/sim/floor", json={"on": True})
+        client.post("/api/sim/trigger?source=motion")
+        wait_state(client, "ALERT")
+        end = time.time() + 5
+        while time.time() < end and not g.sms.sent:
+            time.sleep(0.05)
+        assert g.sms.sent and "possible fall" in g.sms.sent[0]
+        kinds = [e["kind"] for e in client.get("/api/events").json()["events"]]
+        assert "escalated" in kinds and "sms_sent" in kinds
