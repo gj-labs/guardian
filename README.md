@@ -48,12 +48,16 @@ States: `MONITORING → VERIFYING (NPU looks) → CHECKIN (asks; 20 s, rechecks 
 |---|---|
 | InternVL3-1B load (once, kept warm) | 7.9 s cold, 2.3 s cached |
 | One camera check (NPU) | **0.9–1.5 s** (prefill 0.86 s at 316 tok/s, decode 37 tok/s) |
-| Trigger → spoken check-in | 2.7 s (sound trigger, including a 1.5 s settle) |
+| Trigger → spoken check-in | 2.7–2.8 s (sound trigger, including a 1.5 s settle) |
+| Trigger → family alert (person stays down) | 22.5 s (20 s check-in by design) |
+| Person gets up → incident cancelled | ≤ 6 s (NPU recheck every 4 s) |
 | Runner memory | 574 MiB RSS |
 | Empty floor | 1/1 "no" |
 | Person standing | 5/5 "no" |
 | Doll lying on the floor | 6/6 "yes": a known limitation, see below |
-| Person lying on the floor | *to be filled in on the demo setup* |
+| Person lying on the open floor (full body, mounted camera) | **5/5 "yes"**, 1.1–2.4 s |
+| Thud while the person is standing | rejected as a false alarm (NPU: "not lying down") |
+| Power cycle | Guardian, the NPU runner and the STM32 app all restart on their own |
 
 **Known limitation:** the 1B model treats a doll on the floor as a person, and stricter prompts made it worse
 (7/12). Guardian handles this in the system design instead: camera triggers need motion followed by stillness,
