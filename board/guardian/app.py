@@ -255,6 +255,10 @@ def create_app(cfg: dict | None = None) -> FastAPI:
     def index():
         return FileResponse(STATIC / "index.html")
 
+    @app.get("/aim")
+    def aim():
+        return FileResponse(STATIC / "aim.html")
+
     @app.get("/api/status")
     def status():
         return g.status()

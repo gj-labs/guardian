@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Guardian Camera Aim</title>
+<style>
+  :root { --bg: #111317; --text: #eceef2; --muted: #9aa2ae; --ok: #4cc27f; --bad: #ff6b6b; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px system-ui, sans-serif; }
+  main { max-width: 900px; margin: 0 auto; padding: 16px; }
+  img { width: 100%; border-radius: 8px; background: #000; }
+  .row { display: flex; gap: 16px; flex-wrap: wrap; color: var(--muted); margin-top: 8px; }
+  b.ok { color: var(--ok); } b.bad { color: var(--bad); }
+</style>
+</head>
+<body>
+<main>
+  <h2 style="margin:0 0 10px">Aim the camera at the floor</h2>
+  <img id="f" alt="Live camera frame">
+  <div class="row"><span>Brightness: <b id="b">-</b></span><span>Updated: <span id="t">-</span></span>
+    <span>Tip: the floor where someone could fall should fill most of the picture.</span></div>
+</main>
+<script>
+const img = document.getElementById("f"), cv = document.createElement("canvas");
+img.onload = () => {
+  cv.width = 64; cv.height = 48; const c = cv.getContext("2d"); c.drawImage(img, 0, 0, 64, 48);
+  const d = c.getImageData(0, 0, 64, 48).data; let s = 0; for (let i = 0; i < d.length; i += 4) s += (d[i] + d[i+1] + d[i+2]) / 3;
+  const m = Math.round(s / (d.length / 4)), el = document.getElementById("b");
+  el.textContent = m + (m < 18 ? " (too dark)" : m < 60 ? " (dim)" : " (good)"); el.className = m < 60 ? "bad" : "ok";
+  document.getElementById("t").textContent = new Date().toLocaleTimeString();
+  setTimeout(load, 400);
+};
+img.onerror = () => setTimeout(load, 1500);
+function load() { img.src = "/api/frame.jpg?" + Date.now(); }
+load();
+</script>
+</body>
+</html>
