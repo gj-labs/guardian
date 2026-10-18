@@ -53,6 +53,13 @@ def preprocess(frame_bgr: np.ndarray, size: int = 448) -> np.ndarray:
     return np.ascontiguousarray(x.transpose(2, 0, 1)[None])
 
 
+DARK_MEAN = 18.0   # 0-255; below this the model can't see the room (lights off, lens covered)
+
+
+def too_dark(frame: np.ndarray) -> bool:
+    return float(frame.mean()) < DARK_MEAN
+
+
 def parse_yes_no(text: str) -> bool | None:
     m = re.search(r"\b(yes|no)\b", text.lower())
     return None if m is None else m.group(1) == "yes"
@@ -166,6 +173,8 @@ class VlmVision:
         t0 = time.monotonic()
         if frame is None:
             return VisionResult(None, "no camera frame", 0.0, self.name)
+        if too_dark(frame):   # don't let the model guess on a black frame; fusion then asks the wearer
+            return VisionResult(None, "camera view too dark to check", 0.0, self.name)
         try:
             text = self.ask(frame)
         except Exception as e:  # never crash the alert loop; fusion treats None as "ask the wearer"
