@@ -87,7 +87,7 @@ class VlmVision:
                  seq_len: int = 330, timeout_s: float = 30.0, load_timeout_s: float = 90.0,
                  env: dict[str, str] | None = None) -> None:
         self.runner, self.model_dir, self.prefix = runner, Path(model_dir), model_prefix
-        self.workdir = Path(workdir)
+        self.workdir = Path(workdir).resolve()   # runner runs with cwd=workdir; pass it absolute paths
         self.seq_len, self.timeout_s, self.load_timeout_s = seq_len, timeout_s, load_timeout_s
         self.env = {**os.environ, **(env or {})}
         self._proc: subprocess.Popen | None = None

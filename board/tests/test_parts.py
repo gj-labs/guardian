@@ -129,7 +129,7 @@ def test_vlm_persistent_runner_protocol_and_restart(tmp_path):
     runner = tmp_path / "fake_runner.py"
     runner.write_text(FAKE_RUNNER)
     runner.chmod(0o755)
-    v = VlmVision(str(runner), str(tmp_path), "InternVL3", str(tmp_path / "work"), timeout_s=10)
+    v = VlmVision(str(runner), str(tmp_path), "InternVL3", os.path.relpath(tmp_path / "work"), timeout_s=10)
     frame = np.zeros((48, 64, 3), np.uint8)
     r = v.check(frame)
     assert r.on_floor is True and r.description.startswith("Yes, a person")
