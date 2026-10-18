@@ -21,7 +21,7 @@ from .camera import Camera, jpeg
 from .fusion import Effect, Fusion, FusionConfig, State
 from .store import Store
 from .tts import OUT_RATE, Speech
-from .vision import MockVision, make_vision
+from .vision import MockVision, make_vision, parse_yes_no
 
 log = logging.getLogger("guardian")
 STATIC = Path(__file__).parent / "static"
@@ -328,14 +328,20 @@ def create_app(cfg: dict | None = None) -> FastAPI:
         return g.status()
 
     @app.post("/api/sim/check")
-    async def sim_check(request: Request):
-        """Run one camera check on an uploaded JPEG/PNG (body = image bytes). Does not change state."""
+    async def sim_check(request: Request, prompt: str | None = None):
+        """Run one camera check on an uploaded JPEG/PNG (body = image bytes). Does not change state.
+        `prompt` (dev only) overrides the question, for tuning it on saved frames."""
         dev_only()
         import cv2
         import numpy as np
         frame = cv2.imdecode(np.frombuffer(await request.body(), np.uint8), cv2.IMREAD_COLOR)
         if frame is None:
             raise HTTPException(400, "body must be a JPEG or PNG image")
+        if prompt and hasattr(g.vision, "ask"):
+            t0 = time.monotonic()
+            text = await asyncio.to_thread(g.vision.ask, frame, prompt)
+            return {"on_floor": parse_yes_no(text), "description": text,
+                    "latency_ms": round((time.monotonic() - t0) * 1000), "prompt": prompt}
         return await g._check(frame)
 
     @app.websocket("/ws/dash")
