@@ -42,6 +42,43 @@ States: `MONITORING → VERIFYING (NPU looks) → CHECKIN (asks; 20 s, rechecks 
 | pixel 0 blinking blue | Linux app not responding (MCU heartbeat timeout) |
 | pixel 7 white | camera is on |
 
+## Tech stack: Guardian as a body
+
+> Cheap reflexes listen and watch all the time. The NPU brain wakes only when something happens, decides in
+> about a second, and the body asks before it calls the family, all on one Qualcomm board with no cloud.
+
+```text
+        EYES  ─┐  Logitech Brio 101 camera
+        EARS  ─┤  Brio microphone
+               ▼
+     REFLEXES  CPU checks (motion-then-stillness, thud)  ── cheap, always on
+               │ wakes up
+               ▼
+        BRAIN  InternVL3-1B on the Hexagon NPU (ExecuTorch + QNN)  ── "Is someone on the floor?"
+               │
+               ▼
+     JUDGMENT  Python state machine (FastAPI)  ── check → ask → recheck → alert
+        │         │            │                 │
+     MEMORY     VOICE     NERVOUS SYSTEM ──▶ FACE      MESSENGER
+   care log   speaker    Bridge → STM32 → Pixels      family StopWatch
+```
+
+| Body part | What it is | Tech | Job |
+|---|---|---|---|
+| 🦴 **Body** | Arduino VENTUNO Q | Qualcomm Dragonwing IQ8 (QCS8275), Ubuntu 24.04, 16 GB RAM | Everything runs here, with no cloud |
+| 👀 **Eyes** | USB camera | Logitech Brio 101, OpenCV at 5 fps | Watches the floor |
+| 👂 **Ears** | The camera's microphone | 16 kHz audio via ALSA `arecord` | Listens for a thud |
+| ⚡ **Reflexes** | Cheap triggers on the CPU | Frame differencing ("movement, then stillness"); a loudness jump of more than 22 dB | Wake the brain only when something happens. A doll that has lain still all along never triggers it |
+| 🧠 **Brain** | Vision-language model on the NPU | **InternVL3-1B** for QCS8275 (3 `.pte` files: vision encoder, token embedding, decoder), run by ExecuTorch's `qnn_multimodal_persistent` on the **Hexagon NPU** (QNN 2.49 HTP, FastRPC) | Looks and answers in plain language: *"Yes, the person is lying on the floor."* About 1 s per check, kept loaded (8 s load once), 574 MiB |
+| 🎯 **Judgment** | Decision logic | Python state machine in FastAPI: MONITORING → VERIFYING → CHECKIN → ALERT | Asks first, rechecks every 4 s, cancels if the person gets up, rejects false alarms |
+| 🗣️ **Voice** | Spoken check-in | espeak-ng (or Piper) text-to-speech through PipeWire | *"Are you okay? … please get up."* |
+| 🧬 **Nervous system** | Linux-to-microcontroller link | Arduino Bridge (MessagePack-RPC through `arduino-router`) to the **STM32H5** (Zephyr), heartbeat every second | Carries decisions to the hardware. If the brain stops, the MCU shows a fault |
+| 🚨 **Face** | Status lights | **Modulino Pixels** (8 RGB LEDs over Qwiic/I2C), driven by the STM32 | Green = calm, amber = checking or countdown, red = family alerted, white = camera on |
+| 📣 **Messenger** | The family's wrist | **M5Stack StopWatch** (ESP32-S3) over a Wi-Fi WebSocket; finds the board by name (`qcventuno001.local`) | Buzzes and shows what the camera saw; a tap means *"I'm on my way"* |
+| 📒 **Memory** | Care log | SQLite with a SHA-256 hash chain; keeps only the alert snapshot | Tamper-evident history for the caregiver |
+| 🪟 **Window** | Caregiver page | FastAPI web page plus a live `/aim` camera view | Live state, the NPU's answer, latency and the log |
+| ❤️ **Immune system** | Self-healing | systemd user service, plus the STM32 app as the board's default app; dark-frame guard | Restarts on its own after a power cut. A dark picture never gets a guess; Guardian asks instead |
+
 ## Measured on the board (VENTUNO Q, QCS8275, QNN 2.49, ExecuTorch from the track archive)
 
 | Metric | Value |
